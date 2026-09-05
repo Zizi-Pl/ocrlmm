@@ -1,2 +1,2 @@
-flet==0.22.1
+flet[all]==0.85.3
 openai

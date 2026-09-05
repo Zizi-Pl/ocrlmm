@@ -7,13 +7,20 @@ import asyncio
 from datetime import datetime
 from openai import OpenAI
 
-CONFIG_FILE = "ocrlmm_mobile_config.json"
+# Katalog trwałego przechowywania danych aplikacji.
+# Na Androidzie/iOS zapis do bieżącego katalogu roboczego (os.getcwd()) może się nie udać
+# albo nie przetrwać do kolejnego uruchomienia aplikacji – Flet udostępnia do tego
+# dedykowane, gwarantowane zapisywalne katalogi przez zmienne środowiskowe.
+KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
+KATALOG_TYMCZASOWY = os.getenv("FLET_APP_STORAGE_TEMP", os.getcwd())
+
+CONFIG_FILE = os.path.join(KATALOG_DANYCH, "ocrlmm_mobile_config.json")
 
 DOMYSLNA_KONFIGURACJA = {
     "wol_mac": "2C:F0:5D:E4:8E:85",
     "serwer_ip": "192.168.1.154",
     "serwer_port": "1234",
-    "api_key": "sk-lm-xUrZOIvq:dzAM0ZP2iVJqZnb25Oa7",
+    "api_key": "",
     "model_name": "google/gemma-3-4b",
     "use_custom_url": False,
     "custom_base_url": "https://api.openai.com/v1"
@@ -163,10 +170,10 @@ async def main(page: ft.Page):
     status_text = ft.Text(
         "Gotowy do wybrania zdjęcia faktury.",
         size=13,
-        color=ft.colors.GREEN_ACCENT,
+        color=ft.Colors.GREEN_ACCENT,
         text_align=ft.TextAlign.CENTER
     )
-    pasek_postepu = ft.ProgressBar(visible=False, color=ft.colors.GREEN_ACCENT)
+    pasek_postepu = ft.ProgressBar(visible=False, color=ft.Colors.GREEN_ACCENT)
     podglad_obrazu = ft.Image(src="", visible=False, fit=ft.ImageFit.CONTAIN, height=220)
 
     def usun_wybrane_zdjecie(e):
@@ -175,13 +182,13 @@ async def main(page: ft.Page):
         btn_usun_zdjecie.visible = False
         btn_udostepnij.visible = False
         status_text.value = "Zdjęcie usunięte. Gotowy do wybrania nowego."
-        status_text.color = ft.colors.GREEN_ACCENT
+        status_text.color = ft.Colors.GREEN_ACCENT
         page.update()
 
     btn_usun_zdjecie = ft.ElevatedButton(
-        content=ft.Row([ft.Icon(ft.icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
+        content=ft.Row([ft.Icon(ft.Icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
         visible=False,
-        style=ft.ButtonStyle(color=ft.colors.RED_300),
+        style=ft.ButtonStyle(color=ft.Colors.RED_300),
         on_click=usun_wybrane_zdjecie
     )
 
@@ -200,7 +207,7 @@ async def main(page: ft.Page):
         zapisz_konfiguracje(konfig)
         dlg_ustawienia.open = False
         status_text.value = "Ustawienia zostały zapisane."
-        status_text.color = ft.colors.CYAN_ACCENT
+        status_text.color = ft.Colors.CYAN_ACCENT
         page.update()
 
     dlg_ustawienia = ft.AlertDialog(
@@ -223,7 +230,7 @@ async def main(page: ft.Page):
             ft.ElevatedButton(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
             ft.ElevatedButton(
                 content=ft.Text("Zapisz"),
-                style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_800, color=ft.colors.WHITE),
+                style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color=ft.Colors.WHITE),
                 on_click=zapisz_i_zamknij_dialog
             )
         ]
@@ -239,10 +246,10 @@ async def main(page: ft.Page):
             mac = txt_mac.value.strip()
             wyslij_wol(mac)
             status_text.value = f"Pakiet Wake-on-LAN wysłany do: {mac}"
-            status_text.color = ft.colors.CYAN_ACCENT
+            status_text.color = ft.Colors.CYAN_ACCENT
         except Exception as err_wol:
             status_text.value = f"Błąd WoL: {err_wol}"
-            status_text.color = ft.colors.RED_ACCENT
+            status_text.color = ft.Colors.RED_ACCENT
         page.update()
 
     async def udostepnij_plik(sciezka):
@@ -260,7 +267,7 @@ async def main(page: ft.Page):
     async def przetworz_plik(sciezka_obrazu):
         try:
             status_text.value = "Wysyłanie i analiza faktury przez model..."
-            status_text.color = ft.colors.ORANGE_ACCENT
+            status_text.color = ft.Colors.ORANGE_ACCENT
             pasek_postepu.visible = True
             btn_foto.disabled = True
             btn_usun_zdjecie.visible = False
@@ -341,21 +348,21 @@ async def main(page: ft.Page):
 
             nr_dok = "".join(c for c in dane.get("nr_dok", "faktura") if c.isalnum() or c in ("-", "_"))
             nazwa_pliku = f"edi_{nr_dok}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            sciezka_edi = os.path.join(os.getcwd(), nazwa_pliku)
+            sciezka_edi = os.path.join(KATALOG_DANYCH, nazwa_pliku)
 
             with open(sciezka_edi, "w", encoding="windows-1250", errors="replace") as f:
                 f.write(tresc_edi)
 
             ostatnia_sciezka_edi["sciezka"] = sciezka_edi
             status_text.value = f"✅ Gotowe! Utworzono: {nazwa_pliku}"
-            status_text.color = ft.colors.GREEN_ACCENT
+            status_text.color = ft.Colors.GREEN_ACCENT
             
             btn_udostepnij.visible = True
             await udostepnij_plik(sciezka_edi)
 
         except Exception as err:
             status_text.value = f"Błąd: {str(err)}"
-            status_text.color = ft.colors.RED_ACCENT
+            status_text.color = ft.Colors.RED_ACCENT
         finally:
             pasek_postepu.visible = False
             btn_foto.disabled = False
@@ -367,7 +374,6 @@ async def main(page: ft.Page):
             wybrany = e.files[0].path
             podglad_obrazu.src = wybrany
             podglad_obrazu.visible = True
-            btn_usun_zdjecie.visible > 0 and setattr(btn_usun_zdjecie, 'visible', True)
             btn_usun_zdjecie.visible = True
             page.update()
             await przetworz_plik(wybrany)
@@ -380,13 +386,13 @@ async def main(page: ft.Page):
 
     btn_foto = ft.ElevatedButton(
         content=ft.Row(
-            [ft.Icon(ft.icons.PHOTO_CAMERA), ft.Text("Wybierz zdjęcie / Zrób foto")],
+            [ft.Icon(ft.Icons.PHOTO_CAMERA), ft.Text("Wybierz zdjęcie / Zrób foto")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         height=55,
         style=ft.ButtonStyle(
-            bgcolor=ft.colors.GREEN_800,
-            color=ft.colors.WHITE,
+            bgcolor=ft.Colors.GREEN_800,
+            color=ft.Colors.WHITE,
             shape=ft.RoundedRectangleBorder(radius=8)
         ),
         on_click=wybierz_zdjecie
@@ -397,27 +403,27 @@ async def main(page: ft.Page):
 
     btn_udostepnij = ft.ElevatedButton(
         content=ft.Row(
-            [ft.Icon(ft.icons.SHARE), ft.Text("Udostępnij plik EDI")],
+            [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         visible=False,
         height=48,
         style=ft.ButtonStyle(
-            bgcolor=ft.colors.BLUE_GREY_800,
-            color=ft.colors.WHITE,
+            bgcolor=ft.Colors.BLUE_GREY_800,
+            color=ft.Colors.WHITE,
             shape=ft.RoundedRectangleBorder(radius=8)
         ),
         on_click=klik_udostepnij
     )
 
     btn_wol = ft.ElevatedButton(
-        content=ft.Row([ft.Icon(ft.icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
-        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_GREY_900, color=ft.colors.BLUE_200),
+        content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
+        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
         on_click=klik_budzenie_wol
     )
 
     btn_settings = ft.IconButton(
-        icon=ft.icons.SETTINGS,
+        icon=ft.Icons.SETTINGS,
         tooltip="Ustawienia połączenia",
         on_click=otworz_ustawienia
     )
@@ -426,8 +432,8 @@ async def main(page: ft.Page):
         [
             ft.Column(
                 [
-                    ft.Text("ocrLmm Mobile", size=22, weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_400),
-                    ft.Text("Skaner PZ do EDI (PC-Market)", size=12, color=ft.colors.GREY_400)
+                    ft.Text("ocrLmm Mobile", size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_400),
+                    ft.Text("Skaner PZ do EDI (PC-Market)", size=12, color=ft.Colors.GREY_400)
                 ],
                 spacing=2
             ),
@@ -440,7 +446,7 @@ async def main(page: ft.Page):
         ft.Column(
             [
                 pasek_tytulu,
-                ft.Divider(height=10, color=ft.colors.TRANSPARENT),
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 btn_foto,
                 btn_wol,
                 pasek_postepu,
