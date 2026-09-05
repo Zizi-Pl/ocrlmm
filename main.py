@@ -367,6 +367,7 @@ async def main(page: ft.Page):
             wybrany = e.files[0].path
             podglad_obrazu.src = wybrany
             podglad_obrazu.visible = True
+            btn_usun_zdjecie.visible > 0 and setattr(btn_usun_zdjecie, 'visible', True)
             btn_usun_zdjecie.visible = True
             page.update()
             await przetworz_plik(wybrany)
@@ -379,7 +380,7 @@ async def main(page: ft.Page):
 
     btn_foto = ft.ElevatedButton(
         content=ft.Row(
-            [ft.Icon(ft.icons.ADD_APERTURE), ft.Text("Wybierz zdjęcie / Zrób foto")],
+            [ft.Icon(ft.icons.PHOTO_CAMERA), ft.Text("Wybierz zdjęcie / Zrób foto")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         height=55,
