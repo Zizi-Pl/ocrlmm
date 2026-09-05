@@ -351,7 +351,6 @@ async def main(page: ft.Page):
             status_text.color = ft.colors.GREEN_ACCENT
             
             btn_udostepnij.visible = True
-
             await udostepnij_plik(sciezka_edi)
 
         except Exception as err:
@@ -363,7 +362,6 @@ async def main(page: ft.Page):
             btn_usun_zdjecie.visible = True
             page.update()
 
-    # POPRAWKA: Obsługa FilePickera przez zdarzenie on_result dla wersji 0.22.1
     async def on_zdjecie_wybrane(e: ft.FilePickerResultEvent):
         if e.files and len(e.files) > 0:
             wybrany = e.files[0].path
@@ -381,7 +379,7 @@ async def main(page: ft.Page):
 
     btn_foto = ft.ElevatedButton(
         content=ft.Row(
-            [ft.Icon(ft.icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie z galerii")],
+            [ft.Icon(ft.icons.ADD_APERTURE), ft.Text("Wybierz zdjęcie / Zrób foto")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         height=55,
