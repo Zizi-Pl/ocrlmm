@@ -31,8 +31,10 @@ jobs:
           pip install "flet[all]"
 
       - name: Budowanie APK dla Androida
+        env:
+          CI: "true"
         run: |
-          flet build apk --project "ocrLmm" --description "Skaner PZ do EDI" -y -v
+          yes | flet build apk --project "ocrLmm" --description "Skaner PZ do EDI" -v
 
       - name: Zapisanie pliku APK jako Artifact
         uses: actions/upload-artifact@v4
