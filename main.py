@@ -2,10 +2,8 @@ import flet as ft
 import base64
 import json
 import os
-import sys
 import socket
 import asyncio
-import subprocess
 from datetime import datetime
 from openai import OpenAI
 
@@ -21,7 +19,6 @@ DOMYSLNA_KONFIGURACJA = {
     "custom_base_url": "https://api.openai.com/v1"
 }
 
-
 def wczytaj_konfiguracje():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -34,7 +31,6 @@ def wczytaj_konfiguracje():
             return DOMYSLNA_KONFIGURACJA.copy()
     return DOMYSLNA_KONFIGURACJA.copy()
 
-
 def zapisz_konfiguracje(konf):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -42,9 +38,7 @@ def zapisz_konfiguracje(konf):
     except Exception as e:
         print(f"Błąd zapisu konfiguracji: {e}")
 
-
 def wyslij_wol(mac_address: str):
-    """Wysyła pakiet Magic Packet Wake-on-LAN."""
     czysty_mac = mac_address.replace(":", "").replace("-", "").replace(".", "")
     if len(czysty_mac) != 12:
         raise ValueError("Nieprawidłowy format adresu MAC (wymagane 12 znaków hex).")
@@ -55,7 +49,6 @@ def wyslij_wol(mac_address: str):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.sendto(magic_packet, ("<broadcast>", 9))
-
 
 def generuj_tekst_edi(dane: dict) -> str:
     pozycje = dane.get("pozycje", [])
@@ -126,11 +119,11 @@ def generuj_tekst_edi(dane: dict) -> str:
     linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.')}")
     return "\n".join(linie) + "\n"
 
-
 async def main(page: ft.Page):
     page.title = "ocrLmm Mobilny"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 16
+    page.scroll = ft.ScrollMode.AUTO
 
     konfig = wczytaj_konfiguracje()
     ostatnia_sciezka_edi = {"sciezka": None}
@@ -147,7 +140,14 @@ async def main(page: ft.Page):
         can_reveal_password=True,
         dense=True
     )
-    chk_custom = ft.Checkbox(label="Użyj niestandardowego URL (np. Chmura)", value=konfig["use_custom_url"])
+    
+    # Responsywny checkbox dla chmury
+    chk_custom = ft.Checkbox(value=konfig["use_custom_url"])
+    wiersz_chmura = ft.Row([
+        chk_custom,
+        ft.Text("Użyj niestandardowego URL (np. API w chmurze)", expand=True)
+    ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
     txt_custom_url = ft.TextField(
         label="Niestandardowy Base URL",
         value=konfig["custom_base_url"],
@@ -162,13 +162,30 @@ async def main(page: ft.Page):
     chk_custom.on_change = zmien_chk_custom
 
     status_text = ft.Text(
-        "Gotowy do wykonania zdjęcia faktury.",
+        "Gotowy do wybrania zdjęcia faktury.",
         size=13,
         color=ft.Colors.GREEN_ACCENT,
         text_align=ft.TextAlign.CENTER
     )
     pasek_postepu = ft.ProgressBar(visible=False, color=ft.Colors.GREEN_ACCENT)
     podglad_obrazu = ft.Image(src="", visible=False, fit=ft.BoxFit.CONTAIN, height=220)
+
+    # Funkcja do usuwania zablokowanego zdjęcia
+    def usun_wybrane_zdjecie(e):
+        podglad_obrazu.src = ""
+        podglad_obrazu.visible = False
+        btn_usun_zdjecie.visible = False
+        btn_udostepnij.visible = False
+        status_text.value = "Zdjęcie usunięte. Gotowy do wybrania nowego."
+        status_text.color = ft.Colors.GREEN_ACCENT
+        page.update()
+
+    btn_usun_zdjecie = ft.Button(
+        content=ft.Row([ft.Icon(ft.Icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
+        visible=False,
+        style=ft.ButtonStyle(color=ft.Colors.RED_300),
+        on_click=usun_wybrane_zdjecie
+    )
 
     # --- OKNO DIALOGOWE USTAWIEŃ ---
     def zamknij_dialog(e):
@@ -190,24 +207,20 @@ async def main(page: ft.Page):
         page.update()
 
     dlg_ustawienia = ft.AlertDialog(
-        title=ft.Text("⚙️ Ustawienia połączenia i API"),
-        content=ft.Container(
-            content=ft.Column(
-                [
-                    txt_mac,
-                    txt_ip,
-                    txt_port,
-                    txt_model,
-                    txt_api_key,
-                    chk_custom,
-                    txt_custom_url
-                ],
-                tight=True,
-                scroll=ft.ScrollMode.AUTO,
-                spacing=10
-            ),
-            width=400,
-            height=350
+        title=ft.Text("⚙️ Ustawienia połączenia"),
+        content=ft.Column(
+            [
+                txt_mac,
+                txt_ip,
+                txt_port,
+                txt_model,
+                txt_api_key,
+                wiersz_chmura,
+                txt_custom_url
+            ],
+            tight=True,
+            scroll=ft.ScrollMode.AUTO,
+            spacing=10
         ),
         actions=[
             ft.Button(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
@@ -247,28 +260,14 @@ async def main(page: ft.Page):
             status_text.value = f"Plik zapisany, błąd menu udostępniania: {e_share}"
             page.update()
 
-    async def otworz_folder_z_plikiem(e):
-        sciezka = ostatnia_sciezka_edi.get("sciezka")
-        if not sciezka or not os.path.exists(sciezka):
-            return
-        katalog = os.path.dirname(os.path.abspath(sciezka))
-        try:
-            if sys.platform == "win32":
-                subprocess.run(["explorer", "/select,", os.path.normpath(sciezka)])
-            else:
-                await page.launch_url(f"file://{katalog}")
-        except Exception as err_folder:
-            status_text.value = f"Błąd otwierania folderu: {err_folder}"
-            page.update()
-
     async def przetworz_plik(sciezka_obrazu):
         try:
             status_text.value = "Wysyłanie i analiza faktury przez model..."
             status_text.color = ft.Colors.ORANGE_ACCENT
             pasek_postepu.visible = True
             btn_foto.disabled = True
+            btn_usun_zdjecie.visible = False
             btn_udostepnij.visible = False
-            btn_folder.visible = False
             page.update()
 
             with open(sciezka_obrazu, "rb") as img_file:
@@ -333,9 +332,14 @@ async def main(page: ft.Page):
                 odp_tekst = odp_tekst[:-3]
             odp_tekst = odp_tekst.strip()
 
-            dane = json.loads(odp_tekst)
+            # Zabezpieczenie przed błędnym formatem od modelu AI
+            try:
+                dane = json.loads(odp_tekst)
+            except json.JSONDecodeError:
+                raise ValueError("Model AI nie zwrócił poprawnego formatu danych. Wybierz zdjęcie ponownie.")
+
             if "error" in dane:
-                raise ValueError("AI nie wykryło tabeli faktury na zrobionym zdjęciu.")
+                raise ValueError("AI nie wykryło tabeli faktury na wybranym zdjęciu.")
 
             tresc_edi = generuj_tekst_edi(dane)
 
@@ -351,7 +355,6 @@ async def main(page: ft.Page):
             status_text.color = ft.Colors.GREEN_ACCENT
             
             btn_udostepnij.visible = True
-            btn_folder.visible = True
 
             await udostepnij_plik(sciezka_edi)
 
@@ -361,11 +364,15 @@ async def main(page: ft.Page):
         finally:
             pasek_postepu.visible = False
             btn_foto.disabled = False
+            btn_usun_zdjecie.visible = True
             page.update()
 
-    async def wybierz_lub_zrob_zdjecie(e):
+    # Rejestracja FilePickera na stronie
+    picker = ft.FilePicker()
+    page.overlay.append(picker)
+
+    async def wybierz_zdjecie(e):
         try:
-            picker = ft.FilePicker()
             pliki = await picker.pick_files(
                 allow_multiple=False,
                 file_type=ft.FilePickerFileType.IMAGE
@@ -374,6 +381,7 @@ async def main(page: ft.Page):
                 wybrany = pliki[0].path
                 podglad_obrazu.src = wybrany
                 podglad_obrazu.visible = True
+                btn_usun_zdjecie.visible = True
                 page.update()
                 await przetworz_plik(wybrany)
         except Exception as err_pick:
@@ -382,7 +390,7 @@ async def main(page: ft.Page):
 
     btn_foto = ft.Button(
         content=ft.Row(
-            [ft.Icon(ft.Icons.CAMERA_ALT), ft.Text("Zrób zdjęcie / Wybierz fakturę")],
+            [ft.Icon(ft.Icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie z galerii")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         height=55,
@@ -391,7 +399,7 @@ async def main(page: ft.Page):
             color=ft.Colors.WHITE,
             shape=ft.RoundedRectangleBorder(radius=8)
         ),
-        on_click=wybierz_lub_zrob_zdjecie
+        on_click=wybierz_zdjecie
     )
 
     async def klik_udostepnij(e):
@@ -399,7 +407,7 @@ async def main(page: ft.Page):
 
     btn_udostepnij = ft.Button(
         content=ft.Row(
-            [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij (Bluetooth / Quick Share / Mail)")],
+            [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         visible=False,
@@ -412,21 +420,6 @@ async def main(page: ft.Page):
         on_click=klik_udostepnij
     )
 
-    btn_folder = ft.Button(
-        content=ft.Row(
-            [ft.Icon(ft.Icons.FOLDER_OPEN), ft.Text("Otwórz folder z plikiem")],
-            alignment=ft.MainAxisAlignment.CENTER
-        ),
-        visible=False,
-        height=48,
-        style=ft.ButtonStyle(
-            bgcolor=ft.Colors.BLUE_GREY_700,
-            color=ft.Colors.WHITE,
-            shape=ft.RoundedRectangleBorder(radius=8)
-        ),
-        on_click=otworz_folder_z_plikiem
-    )
-
     btn_wol = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
         style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
@@ -435,7 +428,7 @@ async def main(page: ft.Page):
 
     btn_settings = ft.IconButton(
         icon=ft.Icons.SETTINGS,
-        tooltip="Ustawienia połączenia i API",
+        tooltip="Ustawienia połączenia",
         on_click=otworz_ustawienia
     )
 
@@ -463,8 +456,8 @@ async def main(page: ft.Page):
                 pasek_postepu,
                 status_text,
                 btn_udostepnij,
-                btn_folder,
                 podglad_obrazu,
+                btn_usun_zdjecie,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             spacing=10
