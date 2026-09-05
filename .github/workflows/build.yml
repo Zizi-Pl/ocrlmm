@@ -2,7 +2,7 @@ name: Zbuduj Flet APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -23,6 +23,14 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      # KLUCZOWY KROK: Instalacja Flutter SDK wymagana przez Fleta do budowania APK
+      - name: Instalacja Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.x' # Wersja stabilna zgodna z Fletem 0.22.1
+          channel: 'stable'
+          cache: true
 
       - name: Instalacja bibliotek i narzędzia Flet
         run: |
