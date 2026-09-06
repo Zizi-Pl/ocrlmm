@@ -4,46 +4,25 @@ import json
 import os
 import socket
 import asyncio
+import re
+import io
+import httpx
 from datetime import datetime
-from PIL import Image as PILImage  # Do obracania obrazu
-from openai import OpenAI
+from PIL import Image
 
+# Katalog trwałego przechowywania danych aplikacji na pliki EDI (Android/iOS)
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
-KATALOG_TYMCZASOWY = os.getenv("FLET_APP_STORAGE_TEMP", os.getcwd())
-
 os.makedirs(KATALOG_DANYCH, exist_ok=True)
-os.makedirs(KATALOG_TYMCZASOWY, exist_ok=True)
-
-CONFIG_FILE = os.path.join(KATALOG_DANYCH, "ocrlmm_mobile_config.json")
 
 DOMYSLNA_KONFIGURACJA = {
     "wol_mac": "2C:F0:5D:E4:8E:85",
     "serwer_ip": "192.168.1.154",
     "serwer_port": "1234",
-    "api_key": "",
+    "api_key": "sk-lm-local",
     "model_name": "google/gemma-3-4b",
     "use_custom_url": False,
-    "custom_base_url": "https://api.openai.com/v1"
+    "custom_base_url": "[https://api.openai.com/v1](https://api.openai.com/v1)"
 }
-
-def wczytaj_konfiguracje():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                dane = json.load(f)
-                konf = DOMYSLNA_KONFIGURACJA.copy()
-                konf.update(dane)
-                return konf
-        except Exception:
-            return DOMYSLNA_KONFIGURACJA.copy()
-    return DOMYSLNA_KONFIGURACJA.copy()
-
-def zapisz_konfiguracje(konf):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(konf, f, indent=2)
-    except Exception as e:
-        print(f"Błąd zapisu konfiguracji: {e}")
 
 def wyslij_wol(mac_address: str):
     czysty_mac = mac_address.replace(":", "").replace("-", "").replace(".", "")
@@ -56,16 +35,6 @@ def wyslij_wol(mac_address: str):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.sendto(magic_packet, ("<broadcast>", 9))
-
-def obroc_obraz(sciezka_pliku, kat=90):
-    """Obraca plik graficzny o zadany kąt (domyślnie 90 stopni w prawo) i nadpisuje go."""
-    try:
-        with PILImage.open(sciezka_pliku) as img:
-            # Obrót w lewo/prawo (PIL obraca w lewo, więc -kat daje w prawo)
-            obrocony = img.rotate(-kat, expand=True)
-            obrocony.save(sciezka_pliku)
-    except Exception as e:
-        print(f"Błąd obracania obrazu: {e}")
 
 def generuj_tekst_edi(dane: dict) -> str:
     pozycje = dane.get("pozycje", [])
@@ -136,15 +105,29 @@ def generuj_tekst_edi(dane: dict) -> str:
     linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.')}")
     return "\n".join(linie) + "\n"
 
+def kompresuj_do_base64(sciezka_pliku: str) -> str:
+    """Zmniejsza rozmiar zdjęcia z aparatu i zwraca Base64 bez blokowania pamięci"""
+    with Image.open(sciezka_pliku) as img:
+        img.thumbnail((1600, 1600))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        bufor = io.BytesIO()
+        img.save(bufor, format="JPEG", quality=85)
+        return base64.b64encode(bufor.getvalue()).decode("utf-8")
+
 async def main(page: ft.Page):
     page.title = "ocrLmm Mobilny"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 16
     page.scroll = ft.ScrollMode.AUTO
 
-    konfig = wczytaj_konfiguracje()
-    aktualny_plik_obrazu = {"sciezka": None}
+    # Wczytywanie konfiguracji z asynchronicznej pamięci Fleta
+    konfig = DOMYSLNA_KONFIGURACJA.copy()
+    if page.client_storage.contains_key("konfiguracja"):
+        konfig.update(page.client_storage.get("konfiguracja"))
+
     ostatnia_sciezka_edi = {"sciezka": None}
+    aktualne_zdjecie = {"sciezka": None}
 
     txt_mac = ft.TextField(label="Adres MAC (Wake-on-LAN)", value=konfig["wol_mac"], dense=True)
     txt_ip = ft.TextField(label="IP Serwera LM Studio", value=konfig["serwer_ip"], dense=True)
@@ -161,7 +144,7 @@ async def main(page: ft.Page):
     chk_custom = ft.Checkbox(value=konfig["use_custom_url"])
     wiersz_chmura = ft.Row([
         chk_custom,
-        ft.Text("Użyj niestandardowego URL (np. API w chmurze)", expand=True)
+        ft.Text("Użyj niestandardowego URL", expand=True)
     ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     txt_custom_url = ft.TextField(
@@ -184,54 +167,62 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER
     )
     pasek_postepu = ft.ProgressBar(visible=False, color=ft.Colors.GREEN_ACCENT)
-    podglad_obrazu = ft.Image(src="", visible=False, fit=ft.BoxFit.CONTAIN, height=220)
+    podglad_obrazu = ft.Image(src="", visible=False, fit=ft.ImageFit.CONTAIN, height=240)
 
-    # Deklaracje przycisków pomocniczych
+    def usun_wybrane_zdjecie(e):
+        aktualne_zdjecie["sciezka"] = None
+        podglad_obrazu.src = ""
+        podglad_obrazu.visible = False
+        btn_usun_zdjecie.visible = False
+        btn_udostepnij.visible = False
+        btn_ponow.visible = False
+        wiersz_obrotu.visible = False
+        status_text.value = "Zdjęcie usunięte. Wybierz nowe zdjęcie faktury."
+        status_text.color = ft.Colors.GREEN_ACCENT
+        page.update()
+
     btn_usun_zdjecie = ft.ElevatedButton(
         content=ft.Row([ft.Icon(ft.Icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
         visible=False,
         style=ft.ButtonStyle(color=ft.Colors.RED_300),
+        on_click=usun_wybrane_zdjecie
     )
 
-    btn_obroc = ft.ElevatedButton(
-        content=ft.Row([ft.Icon(ft.Icons.ROTATE_90_DEGREES_CW), ft.Text("Obróć 90°")], alignment=ft.MainAxisAlignment.CENTER),
-        visible=False,
-        style=ft.ButtonStyle(color=ft.Colors.AMBER_300),
-    )
-
-    btn_udostepnij = ft.ElevatedButton(
-        content=ft.Row([ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")], alignment=ft.MainAxisAlignment.CENTER),
-        visible=False,
-        height=48,
-        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_800, color=ft.Colors.WHITE)
-    )
-
-    def usun_wybrane_zdjecie(e):
-        aktualny_plik_obrazu["sciezka"] = None
-        podglad_obrazu.src = ""
-        podglad_obrazu.visible = False
-        btn_usun_zdjecie.visible = False
-        btn_obroc.visible = False
-        btn_udostepnij.visible = False
-        status_text.value = "Zdjęcie usunięte. Wybierz nowe."
-        status_text.color = ft.Colors.GREEN_ACCENT
-        page.update()
-
-    btn_usun_zdjecie.on_click = usun_wybrane_zdjecie
-
-    async def obroc_i_odswiez(e):
-        p = aktualny_plik_obrazu["sciezka"]
-        if p and os.path.exists(p):
-            obroc_obraz(p, 90)
-            # Odświeżenie widoku obrazka w Flet (wymuszenie przeładowania cache ścieżki)
-            podglad_obrazu.src = f"{p}?t={datetime.now().timestamp()}"
+    def obroc_zdjecie(kat):
+        sciezka = aktualne_zdjecie["sciezka"]
+        if not sciezka or not os.path.exists(sciezka):
+            return
+        try:
+            with Image.open(sciezka) as im:
+                obrocony = im.rotate(kat, expand=True)
+                obrocony.save(sciezka)
+            
+            podglad_obrazu.src = f"{sciezka}?t={datetime.now().timestamp()}"
+            status_text.value = f"Obrócono zdjęcie o {abs(kat)}°. Kliknij 'Wyślij ponownie do analizy'."
+            status_text.color = ft.Colors.CYAN_ACCENT
+            btn_ponow.visible = True
             page.update()
-            await przetworz_plik(p)
+        except Exception as err_rot:
+            status_text.value = f"Błąd obracania: {err_rot}"
+            page.update()
 
-    btn_obroc.on_click = obroc_i_odswiez
+    btn_obroc_lewo = ft.ElevatedButton(
+        content=ft.Row([ft.Icon(ft.Icons.ROTATE_LEFT), ft.Text("W lewo")], alignment=ft.MainAxisAlignment.CENTER),
+        expand=True,
+        on_click=lambda e: obroc_zdjecie(90)
+    )
+
+    btn_obroc_prawo = ft.ElevatedButton(
+        content=ft.Row([ft.Icon(ft.Icons.ROTATE_RIGHT), ft.Text("W prawo")], alignment=ft.MainAxisAlignment.CENTER),
+        expand=True,
+        on_click=lambda e: obroc_zdjecie(-90)
+    )
+
+    wiersz_obrotu = ft.Row([btn_obroc_lewo, btn_obroc_prawo], visible=False, spacing=10)
 
     def zamknij_dialog(e):
-        page.pop_dialog()
+        dlg_ustawienia.open = False
+        page.update()
 
     def zapisz_i_zamknij_dialog(e):
         konfig["wol_mac"] = txt_mac.value.strip()
@@ -241,8 +232,9 @@ async def main(page: ft.Page):
         konfig["model_name"] = txt_model.value.strip()
         konfig["use_custom_url"] = chk_custom.value
         konfig["custom_base_url"] = txt_custom_url.value.strip()
-        zapisz_konfiguracje(konfig)
-        page.pop_dialog()
+        
+        page.client_storage.set("konfiguracja", konfig)
+        dlg_ustawienia.open = False
         status_text.value = "Ustawienia zostały zapisane."
         status_text.color = ft.Colors.CYAN_ACCENT
         page.update()
@@ -250,72 +242,71 @@ async def main(page: ft.Page):
     dlg_ustawienia = ft.AlertDialog(
         title=ft.Text("⚙️ Ustawienia połączenia"),
         content=ft.Column(
-            [txt_mac, txt_ip, txt_port, txt_model, txt_api_key, wiersz_chmura, txt_custom_url],
+            [
+                txt_mac, txt_ip, txt_port, txt_model, txt_api_key, wiersz_chmura, txt_custom_url
+            ],
             tight=True, scroll=ft.ScrollMode.AUTO, spacing=10
         ),
         actions=[
-            ft.Button(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
-            ft.Button(
+            ft.ElevatedButton(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
+            ft.ElevatedButton(
                 content=ft.Text("Zapisz"),
                 style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color=ft.Colors.WHITE),
                 on_click=zapisz_i_zamknij_dialog
             )
         ]
     )
+    page.overlay.append(dlg_ustawienia)
 
     def otworz_ustawienia(e):
-        page.show_dialog(dlg_ustawienia)
+        dlg_ustawienia.open = True
+        page.update()
 
     async def klik_budzenie_wol(e):
         try:
-            mac = txt_mac.value.strip()
-            wyslij_wol(mac)
-            status_text.value = f"Pakiet Wake-on-LAN wysłany do: {mac}"
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: wyslij_wol(txt_mac.value.strip()))
+            status_text.value = "Pakiet Wake-on-LAN wysłany. Poczekaj 15-20 sek. na start serwera."
             status_text.color = ft.Colors.CYAN_ACCENT
         except Exception as err_wol:
             status_text.value = f"Błąd WoL: {err_wol}"
             status_text.color = ft.Colors.RED_ACCENT
         page.update()
 
-    serwis_udostepniania = ft.Share()
-    page.services.append(serwis_udostepniania)
-
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
             return
         try:
-            await serwis_udostepniania.share_files(
-                [ft.ShareFile.from_path(sciezka)],
-                text="Plik EDI wygenerowany przez ocrLmm",
-            )
+            if hasattr(page, "share_files"):
+                wynik = page.share_files([sciezka])
+                if asyncio.iscoroutine(wynik):
+                    await wynik
         except Exception as e_share:
-            status_text.value = f"Plik zapisany, błąd menu udostępniania: {e_share}"
+            status_text.value = f"Błąd menu udostępniania: {e_share}"
             page.update()
 
     async def przetworz_plik(sciezka_obrazu):
+        if not sciezka_obrazu or not os.path.exists(sciezka_obrazu):
+            return
+
         try:
-            status_text.value = "Wysyłanie i analiza faktury przez model..."
+            status_text.value = "Kompresja i analiza faktury..."
             status_text.color = ft.Colors.ORANGE_ACCENT
             pasek_postepu.visible = True
             btn_foto.disabled = True
+            btn_ponow.visible = False
             btn_usun_zdjecie.visible = False
-            btn_obroc.visible = False
             btn_udostepnij.visible = False
+            wiersz_obrotu.visible = False
             page.update()
 
-            with open(sciezka_obrazu, "rb") as img_file:
-                base64_image = base64.b64encode(img_file.read()).decode("utf-8")
+            loop = asyncio.get_running_loop()
+            base64_image = await loop.run_in_executor(None, kompresuj_do_base64, sciezka_obrazu)
 
             if konfig["use_custom_url"]:
                 b_url = konfig["custom_base_url"].strip()
             else:
                 b_url = f"http://{konfig['serwer_ip'].strip()}:{konfig['serwer_port'].strip()}/v1"
-
-            client = OpenAI(
-                base_url=b_url,
-                api_key=konfig["api_key"].strip() or "lm-studio",
-                timeout=45.0  # Dodany timeout na wypadek wolnej sieci / zawieszenia serwera
-            )
 
             prompt = (
                 "Przeanalizuj to zdjęcie. Jeśli na obrazie NIE MA faktury, dokumentu handlowego "
@@ -336,29 +327,191 @@ async def main(page: ft.Page):
                 "Zwróć TYLKO czysty JSON, bez znaczników ```json."
             )
 
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.chat.completions.create(
-                    model=konfig["model_name"].strip() or "google/gemma-3-4b",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                        ]
-                    }],
-                    temperature=0.1
-                )
-            )
+            naglowki = {"Authorization": f"Bearer {konfig['api_key'].strip() or 'sk-lm-local'}"}
+            cialo_zapytania = {
+                "model": konfig["model_name"].strip() or "google/gemma-3-4b",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }],
+                "temperature": 0.1
+            }
 
-            odp_tekst = response.choices[0].message.content.strip()
-            if odp_tekst.startswith("```json"):
-                odp_tekst = odp_tekst[7:]
-            if odp_tekst.endswith("```"):
-                odp_tekst = odp_tekst[:-3]
-            odp_tekst = odp_tekst.strip()
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                odpowiedz = await client.post(
+                    f"{b_url}/chat/completions",
+                    headers=naglowki,
+                    json=cialo_zapytania
+                )
+                odpowiedz.raise_for_status()
+                dane_odp = odpowiedz.json()
+                odp_tekst = dane_odp["choices"][0]["message"]["content"].strip()
+
+            # Zabezpieczenie przed halucynacjami i nadmiarowym tekstem z modeli (wyciąga czysty JSON z klamer)
+            dopasowanie = re.search(r'\{.*\}', odp_tekst, re.DOTALL)
+            if not dopasowanie:
+                raise ValueError("Model AI nie zwrócił poprawnego formatu strukturalnego. Spróbuj obrócić zdjęcie.")
+
+            czysty_json = dopasowanie.group(0)
 
             try:
-                dane = json.loads(odp_tekst)
-            except
+                dane = json.loads(czysty_json)
+            except json.JSONDecodeError:
+                raise ValueError("Wewnętrzny błąd parsowania JSON. Zdjęcie może być nieczytelne.")
+
+            if "error" in dane:
+                raise ValueError("AI nie wykryło tabeli faktury. Jeśli dokument jest w poziomie, obróć go przyciskami poniżej i spróbuj ponownie.")
+
+            tresc_edi = generuj_tekst_edi(dane)
+
+            nr_dok = "".join(c for c in dane.get("nr_dok", "faktura") if c.isalnum() or c in ("-", "_"))
+            nazwa_pliku = f"edi_{nr_dok}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            sciezka_edi = os.path.join(KATALOG_DANYCH, nazwa_pliku)
+
+            with open(sciezka_edi, "w", encoding="windows-1250", errors="replace") as f:
+                f.write(tresc_edi)
+
+            ostatnia_sciezka_edi["sciezka"] = sciezka_edi
+            status_text.value = f"✅ Gotowe! Utworzono: {nazwa_pliku}"
+            status_text.color = ft.Colors.GREEN_ACCENT
+            
+            btn_udostepnij.visible = True
+            await udostepnij_plik(sciezka_edi)
+
+        except Exception as err:
+            komunikat = str(err)
+            if "timeout" in komunikat.lower() or "timed out" in komunikat.lower():
+                status_text.value = "Błąd: Serwer nie odpowiada (Timeout). Upewnij się, że komputer jest włączony i sprawdź IP."
+            elif "connect" in komunikat.lower() or "refused" in komunikat.lower():
+                status_text.value = "Błąd połączenia: Serwer LM Studio jest wyłączony lub podano złe IP."
+            else:
+                status_text.value = f"Błąd: {komunikat}"
+            
+            status_text.color = ft.Colors.RED_ACCENT
+            btn_ponow.visible = True
+        finally:
+            pasek_postepu.visible = False
+            btn_foto.disabled = False
+            btn_usun_zdjecie.visible = True
+            wiersz_obrotu.visible = True
+            page.update()
+
+    async def on_zdjecie_wybrane(e: ft.FilePickerResultEvent):
+        if e.files and len(e.files) > 0:
+            wybrany = e.files[0].path
+            aktualne_zdjecie["sciezka"] = wybrany
+            podglad_obrazu.src = wybrany
+            podglad_obrazu.visible = True
+            btn_usun_zdjecie.visible = True
+            wiersz_obrotu.visible = True
+            page.update()
+            await przetworz_plik(wybrany)
+
+    picker = ft.FilePicker(on_result=on_zdjecie_wybrane)
+    page.overlay.append(picker)
+
+    def wybierz_zdjecie(e):
+        picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
+
+    btn_foto = ft.ElevatedButton(
+        content=ft.Row(
+            [ft.Icon(ft.Icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie faktury")],
+            alignment=ft.MainAxisAlignment.CENTER
+        ),
+        height=55,
+        style=ft.ButtonStyle(
+            bgcolor=ft.Colors.GREEN_800,
+            color=ft.Colors.WHITE,
+            shape=ft.RoundedRectangleBorder(radius=8)
+        ),
+        on_click=wybierz_zdjecie
+    )
+
+    async def klik_ponow(e):
+        if aktualne_zdjecie["sciezka"]:
+            await przetworz_plik(aktualne_zdjecie["sciezka"])
+
+    btn_ponow = ft.ElevatedButton(
+        content=ft.Row(
+            [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij ponownie do analizy")],
+            alignment=ft.MainAxisAlignment.CENTER
+        ),
+        visible=False,
+        height=48,
+        style=ft.ButtonStyle(
+            bgcolor=ft.Colors.AMBER_900,
+            color=ft.Colors.WHITE,
+            shape=ft.RoundedRectangleBorder(radius=8)
+        ),
+        on_click=klik_ponow
+    )
+
+    async def klik_udostepnij(e):
+        await udostepnij_plik(ostatnia_sciezka_edi["sciezka"])
+
+    btn_udostepnij = ft.ElevatedButton(
+        content=ft.Row(
+            [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")],
+            alignment=ft.MainAxisAlignment.CENTER
+        ),
+        visible=False,
+        height=48,
+        style=ft.ButtonStyle(
+            bgcolor=ft.Colors.BLUE_GREY_800,
+            color=ft.Colors.WHITE,
+            shape=ft.RoundedRectangleBorder(radius=8)
+        ),
+        on_click=klik_udostepnij
+    )
+
+    btn_wol = ft.ElevatedButton(
+        content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
+        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
+        on_click=klik_budzenie_wol
+    )
+
+    btn_settings = ft.IconButton(
+        icon=ft.Icons.SETTINGS,
+        tooltip="Ustawienia połączenia",
+        on_click=otworz_ustawienia
+    )
+
+    pasek_tytulu = ft.Row(
+        [
+            ft.Column(
+                [
+                    ft.Text("ocrLmm Mobile", size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_400),
+                    ft.Text("Skaner PZ do EDI", size=12, color=ft.Colors.GREY_400)
+                ],
+                spacing=2
+            ),
+            btn_settings
+        ],
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+    )
+
+    page.add(
+        ft.Column(
+            [
+                pasek_tytulu,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                btn_foto,
+                btn_wol,
+                pasek_postepu,
+                status_text,
+                btn_ponow,
+                btn_udostepnij,
+                podglad_obrazu,
+                wiersz_obrotu,
+                btn_usun_zdjecie,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=10
+        )
+    )
+
+if __name__ == "__main__":
+    ft.app(target=main)
