@@ -7,16 +7,10 @@ import asyncio
 from datetime import datetime
 from openai import OpenAI
 
-# Katalog trwałego przechowywania danych aplikacji.
-# Na Androidzie/iOS zapis do bieżącego katalogu roboczego (os.getcwd()) może się nie udać
-# albo nie przetrwać do kolejnego uruchomienia aplikacji – Flet udostępnia do tego
-# dedykowane, gwarantowane zapisywalne katalogi przez zmienne środowiskowe.
+# Katalog trwałego przechowywania danych aplikacji (poprawka dla Androida/iOS)
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
 KATALOG_TYMCZASOWY = os.getenv("FLET_APP_STORAGE_TEMP", os.getcwd())
 
-# Katalogi te mogą jeszcze nie istnieć na dysku (np. przy pierwszym uruchomieniu
-# lub w trybie "flet run" na desktopie) – trzeba je utworzyć, zanim spróbujemy
-# tam cokolwiek zapisać.
 os.makedirs(KATALOG_DANYCH, exist_ok=True)
 os.makedirs(KATALOG_TYMCZASOWY, exist_ok=True)
 
@@ -55,10 +49,10 @@ def wyslij_wol(mac_address: str):
     czysty_mac = mac_address.replace(":", "").replace("-", "").replace(".", "")
     if len(czysty_mac) != 12:
         raise ValueError("Nieprawidłowy format adresu MAC (wymagane 12 znaków hex).")
-
+    
     dane_mac = bytes.fromhex(czysty_mac)
     magic_packet = b"\xff" * 6 + dane_mac * 16
-
+    
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.sendto(magic_packet, ("<broadcast>", 9))
@@ -132,7 +126,6 @@ def generuj_tekst_edi(dane: dict) -> str:
     linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.')}")
     return "\n".join(linie) + "\n"
 
-
 async def main(page: ft.Page):
     page.title = "ocrLmm Mobilny"
     page.theme_mode = ft.ThemeMode.DARK
@@ -153,7 +146,7 @@ async def main(page: ft.Page):
         can_reveal_password=True,
         dense=True
     )
-
+    
     chk_custom = ft.Checkbox(value=konfig["use_custom_url"])
     wiersz_chmura = ft.Row([
         chk_custom,

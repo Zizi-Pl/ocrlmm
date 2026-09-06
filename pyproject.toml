@@ -9,8 +9,6 @@ dependencies = [
 ]
 
 [tool.flet]
-# Domena firmowa w notacji odwróconej + nazwa projektu = identyfikator aplikacji
-# (np. com.ocrlmm.ocrlmm). Zmień "ocrlmm" na własną domenę, jeśli publikujesz na Google Play.
 org = "com.ocrlmm"
 product = "ocrLmm"
 company = "ocrLmm"
@@ -19,10 +17,6 @@ copyright = "Copyright (C) 2026"
 [tool.flet.app]
 path = "."
 
-# Uprawnienia wymagane przez aplikację na Androidzie:
-# - INTERNET: komunikacja z serwerem LM Studio / API OpenAI
-# - CAMERA: robienie zdjęć faktur
-# - READ_MEDIA_IMAGES: wybór zdjęć z galerii (Android 13+)
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
 "android.permission.CAMERA" = true
