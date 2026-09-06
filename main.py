@@ -14,6 +14,12 @@ from openai import OpenAI
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
 KATALOG_TYMCZASOWY = os.getenv("FLET_APP_STORAGE_TEMP", os.getcwd())
 
+# Katalogi te mogą jeszcze nie istnieć na dysku (np. przy pierwszym uruchomieniu
+# lub w trybie "flet run" na desktopie) – trzeba je utworzyć, zanim spróbujemy
+# tam cokolwiek zapisać.
+os.makedirs(KATALOG_DANYCH, exist_ok=True)
+os.makedirs(KATALOG_TYMCZASOWY, exist_ok=True)
+
 CONFIG_FILE = os.path.join(KATALOG_DANYCH, "ocrlmm_mobile_config.json")
 
 DOMYSLNA_KONFIGURACJA = {
@@ -174,7 +180,7 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER
     )
     pasek_postepu = ft.ProgressBar(visible=False, color=ft.Colors.GREEN_ACCENT)
-    podglad_obrazu = ft.Image(src="", visible=False, fit=ft.ImageFit.CONTAIN, height=220)
+    podglad_obrazu = ft.Image(src="", visible=False, fit=ft.BoxFit.CONTAIN, height=220)
 
     def usun_wybrane_zdjecie(e):
         podglad_obrazu.src = ""
@@ -185,7 +191,7 @@ async def main(page: ft.Page):
         status_text.color = ft.Colors.GREEN_ACCENT
         page.update()
 
-    btn_usun_zdjecie = ft.ElevatedButton(
+    btn_usun_zdjecie = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
         visible=False,
         style=ft.ButtonStyle(color=ft.Colors.RED_300),
@@ -193,8 +199,7 @@ async def main(page: ft.Page):
     )
 
     def zamknij_dialog(e):
-        dlg_ustawienia.open = False
-        page.update()
+        page.pop_dialog()
 
     def zapisz_i_zamknij_dialog(e):
         konfig["wol_mac"] = txt_mac.value.strip()
@@ -205,7 +210,7 @@ async def main(page: ft.Page):
         konfig["use_custom_url"] = chk_custom.value
         konfig["custom_base_url"] = txt_custom_url.value.strip()
         zapisz_konfiguracje(konfig)
-        dlg_ustawienia.open = False
+        page.pop_dialog()
         status_text.value = "Ustawienia zostały zapisane."
         status_text.color = ft.Colors.CYAN_ACCENT
         page.update()
@@ -227,19 +232,17 @@ async def main(page: ft.Page):
             spacing=10
         ),
         actions=[
-            ft.ElevatedButton(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
-            ft.ElevatedButton(
+            ft.Button(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
+            ft.Button(
                 content=ft.Text("Zapisz"),
                 style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color=ft.Colors.WHITE),
                 on_click=zapisz_i_zamknij_dialog
             )
         ]
     )
-    page.overlay.append(dlg_ustawienia)
 
     def otworz_ustawienia(e):
-        dlg_ustawienia.open = True
-        page.update()
+        page.show_dialog(dlg_ustawienia)
 
     async def klik_budzenie_wol(e):
         try:
@@ -252,14 +255,17 @@ async def main(page: ft.Page):
             status_text.color = ft.Colors.RED_ACCENT
         page.update()
 
+    serwis_udostepniania = ft.Share()
+    page.services.append(serwis_udostepniania)
+
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
             return
         try:
-            if hasattr(page, "share_files"):
-                wynik = page.share_files([sciezka])
-                if asyncio.iscoroutine(wynik):
-                    await wynik
+            await serwis_udostepniania.share_files(
+                [ft.ShareFile.from_path(sciezka)],
+                text="Plik EDI wygenerowany przez ocrLmm",
+            )
         except Exception as e_share:
             status_text.value = f"Plik zapisany, błąd menu udostępniania: {e_share}"
             page.update()
@@ -284,7 +290,7 @@ async def main(page: ft.Page):
 
             client = OpenAI(
                 base_url=b_url,
-                api_key=konfig["api_key"].strip() or "sk-lm-local"
+                api_key=konfig["api_key"].strip() or "lm-studio"
             )
 
             prompt = (
@@ -369,22 +375,28 @@ async def main(page: ft.Page):
             btn_usun_zdjecie.visible = True
             page.update()
 
-    async def on_zdjecie_wybrane(e: ft.FilePickerResultEvent):
-        if e.files and len(e.files) > 0:
-            wybrany = e.files[0].path
+    picker = ft.FilePicker()
+    page.services.append(picker)
+
+    async def wybierz_zdjecie(e):
+        try:
+            pliki = await picker.pick_files(
+                allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE
+            )
+        except Exception as e_pick:
+            status_text.value = f"Błąd wyboru zdjęcia: {e_pick}"
+            page.update()
+            return
+
+        if pliki and len(pliki) > 0:
+            wybrany = pliki[0].path
             podglad_obrazu.src = wybrany
             podglad_obrazu.visible = True
             btn_usun_zdjecie.visible = True
             page.update()
             await przetworz_plik(wybrany)
 
-    picker = ft.FilePicker(on_result=on_zdjecie_wybrane)
-    page.overlay.append(picker)
-
-    def wybierz_zdjecie(e):
-        picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
-
-    btn_foto = ft.ElevatedButton(
+    btn_foto = ft.Button(
         content=ft.Row(
             [ft.Icon(ft.Icons.PHOTO_CAMERA), ft.Text("Wybierz zdjęcie / Zrób foto")],
             alignment=ft.MainAxisAlignment.CENTER
@@ -401,7 +413,7 @@ async def main(page: ft.Page):
     async def klik_udostepnij(e):
         await udostepnij_plik(ostatnia_sciezka_edi["sciezka"])
 
-    btn_udostepnij = ft.ElevatedButton(
+    btn_udostepnij = ft.Button(
         content=ft.Row(
             [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")],
             alignment=ft.MainAxisAlignment.CENTER
@@ -416,7 +428,7 @@ async def main(page: ft.Page):
         on_click=klik_udostepnij
     )
 
-    btn_wol = ft.ElevatedButton(
+    btn_wol = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
         style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
         on_click=klik_budzenie_wol
@@ -461,4 +473,4 @@ async def main(page: ft.Page):
     )
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)
