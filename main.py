@@ -14,6 +14,8 @@ from PIL import Image
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
 os.makedirs(KATALOG_DANYCH, exist_ok=True)
 
+CONFIG_FILE = os.path.join(KATALOG_DANYCH, "ocrlmm_mobile_config.json")
+
 DOMYSLNA_KONFIGURACJA = {
     "wol_mac": "2C:F0:5D:E4:8E:85",
     "serwer_ip": "192.168.1.154",
@@ -21,8 +23,27 @@ DOMYSLNA_KONFIGURACJA = {
     "api_key": "sk-lm-local",
     "model_name": "google/gemma-3-4b",
     "use_custom_url": False,
-    "custom_base_url": "[https://api.openai.com/v1](https://api.openai.com/v1)"
+    "custom_base_url": "https://api.openai.com/v1"
 }
+
+def wczytaj_konfiguracje() -> dict:
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                dane = json.load(f)
+                konf = DOMYSLNA_KONFIGURACJA.copy()
+                konf.update(dane)
+                return konf
+        except Exception:
+            return DOMYSLNA_KONFIGURACJA.copy()
+    return DOMYSLNA_KONFIGURACJA.copy()
+
+def zapisz_konfiguracje(konf: dict):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(konf, f, indent=2)
+    except Exception as e:
+        print(f"Błąd zapisu konfiguracji: {e}")
 
 def wyslij_wol(mac_address: str):
     czysty_mac = mac_address.replace(":", "").replace("-", "").replace(".", "")
@@ -106,7 +127,6 @@ def generuj_tekst_edi(dane: dict) -> str:
     return "\n".join(linie) + "\n"
 
 def kompresuj_do_base64(sciezka_pliku: str) -> str:
-    """Zmniejsza rozmiar zdjęcia z aparatu i zwraca Base64 bez blokowania pamięci"""
     with Image.open(sciezka_pliku) as img:
         img.thumbnail((1600, 1600))
         if img.mode != "RGB":
@@ -121,10 +141,7 @@ async def main(page: ft.Page):
     page.padding = 16
     page.scroll = ft.ScrollMode.AUTO
 
-    # Wczytywanie konfiguracji z asynchronicznej pamięci Fleta
-    konfig = DOMYSLNA_KONFIGURACJA.copy()
-    if page.client_storage.contains_key("konfiguracja"):
-        konfig.update(page.client_storage.get("konfiguracja"))
+    konfig = wczytaj_konfiguracje()
 
     ostatnia_sciezka_edi = {"sciezka": None}
     aktualne_zdjecie = {"sciezka": None}
@@ -167,7 +184,7 @@ async def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER
     )
     pasek_postepu = ft.ProgressBar(visible=False, color=ft.Colors.GREEN_ACCENT)
-    podglad_obrazu = ft.Image(src="", visible=False, fit=ft.ImageFit.CONTAIN, height=240)
+    podglad_obrazu = ft.Image(src="", visible=False, fit="contain", height=240)
 
     def usun_wybrane_zdjecie(e):
         aktualne_zdjecie["sciezka"] = None
@@ -181,7 +198,7 @@ async def main(page: ft.Page):
         status_text.color = ft.Colors.GREEN_ACCENT
         page.update()
 
-    btn_usun_zdjecie = ft.ElevatedButton(
+    btn_usun_zdjecie = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.DELETE_OUTLINE), ft.Text("Usuń wybrane zdjęcie")], alignment=ft.MainAxisAlignment.CENTER),
         visible=False,
         style=ft.ButtonStyle(color=ft.Colors.RED_300),
@@ -206,13 +223,13 @@ async def main(page: ft.Page):
             status_text.value = f"Błąd obracania: {err_rot}"
             page.update()
 
-    btn_obroc_lewo = ft.ElevatedButton(
+    btn_obroc_lewo = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.ROTATE_LEFT), ft.Text("W lewo")], alignment=ft.MainAxisAlignment.CENTER),
         expand=True,
         on_click=lambda e: obroc_zdjecie(90)
     )
 
-    btn_obroc_prawo = ft.ElevatedButton(
+    btn_obroc_prawo = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.ROTATE_RIGHT), ft.Text("W prawo")], alignment=ft.MainAxisAlignment.CENTER),
         expand=True,
         on_click=lambda e: obroc_zdjecie(-90)
@@ -233,7 +250,7 @@ async def main(page: ft.Page):
         konfig["use_custom_url"] = chk_custom.value
         konfig["custom_base_url"] = txt_custom_url.value.strip()
         
-        page.client_storage.set("konfiguracja", konfig)
+        zapisz_konfiguracje(konfig)
         dlg_ustawienia.open = False
         status_text.value = "Ustawienia zostały zapisane."
         status_text.color = ft.Colors.CYAN_ACCENT
@@ -248,8 +265,8 @@ async def main(page: ft.Page):
             tight=True, scroll=ft.ScrollMode.AUTO, spacing=10
         ),
         actions=[
-            ft.ElevatedButton(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
-            ft.ElevatedButton(
+            ft.Button(content=ft.Text("Anuluj"), on_click=zamknij_dialog),
+            ft.Button(
                 content=ft.Text("Zapisz"),
                 style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_800, color=ft.Colors.WHITE),
                 on_click=zapisz_i_zamknij_dialog
@@ -273,16 +290,45 @@ async def main(page: ft.Page):
             status_text.color = ft.Colors.RED_ACCENT
         page.update()
 
+    # Rejestracja serwisów systemowych
+    picker = ft.FilePicker()
+    serwis_udostepniania = ft.Share()
+
+    if hasattr(page, "services"):
+        page.services.append(picker)
+        page.services.append(serwis_udostepniania)
+    else:
+        page.overlay.extend([picker, serwis_udostepniania])
+
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
+            status_text.value = "Brak pliku EDI do udostępnienia (wybierz i przetwórz zdjęcie)."
+            status_text.color = ft.Colors.RED_ACCENT
+            page.update()
             return
+
         try:
-            if hasattr(page, "share_files"):
-                wynik = page.share_files([sciezka])
-                if asyncio.iscoroutine(wynik):
-                    await wynik
+            # 1. Próba natywnego menu udostępniania (Android / iOS)
+            if hasattr(serwis_udostepniania, "share_files"):
+                try:
+                    await serwis_udostepniania.share_files(
+                        [ft.ShareFile.from_path(sciezka)],
+                        text="Plik EDI wygenerowany przez ocrLmm"
+                    )
+                    return
+                except Exception:
+                    await serwis_udostepniania.share_files([sciezka])
+                    return
+
+            # 2. Fallback na komputerze z Windows
+            os.system(f'explorer /select,"{os.path.abspath(sciezka)}"')
+            status_text.value = "Otwarto folder z plikiem EDI na komputerze."
+            status_text.color = ft.Colors.CYAN_ACCENT
+            page.update()
+
         except Exception as e_share:
-            status_text.value = f"Błąd menu udostępniania: {e_share}"
+            status_text.value = f"Błąd udostępniania: {e_share}"
+            status_text.color = ft.Colors.RED_ACCENT
             page.update()
 
     async def przetworz_plik(sciezka_obrazu):
@@ -350,7 +396,6 @@ async def main(page: ft.Page):
                 dane_odp = odpowiedz.json()
                 odp_tekst = dane_odp["choices"][0]["message"]["content"].strip()
 
-            # Zabezpieczenie przed halucynacjami i nadmiarowym tekstem z modeli (wyciąga czysty JSON z klamer)
             dopasowanie = re.search(r'\{.*\}', odp_tekst, re.DOTALL)
             if not dopasowanie:
                 raise ValueError("Model AI nie zwrócił poprawnego formatu strukturalnego. Spróbuj obrócić zdjęcie.")
@@ -399,24 +444,25 @@ async def main(page: ft.Page):
             wiersz_obrotu.visible = True
             page.update()
 
-    async def on_zdjecie_wybrane(e: ft.FilePickerResultEvent):
-        if e.files and len(e.files) > 0:
-            wybrany = e.files[0].path
-            aktualne_zdjecie["sciezka"] = wybrany
-            podglad_obrazu.src = wybrany
-            podglad_obrazu.visible = True
-            btn_usun_zdjecie.visible = True
-            wiersz_obrotu.visible = True
+    async def wybierz_zdjecie(e):
+        try:
+            wynik = picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
+            pliki = await wynik if asyncio.iscoroutine(wynik) else wynik
+
+            if pliki and len(pliki) > 0:
+                wybrany = pliki[0].path
+                aktualne_zdjecie["sciezka"] = wybrany
+                podglad_obrazu.src = wybrany
+                podglad_obrazu.visible = True
+                btn_usun_zdjecie.visible = True
+                wiersz_obrotu.visible = True
+                page.update()
+                await przetworz_plik(wybrany)
+        except Exception as e_pick:
+            status_text.value = f"Błąd wyboru pliku: {e_pick}"
             page.update()
-            await przetworz_plik(wybrany)
 
-    picker = ft.FilePicker(on_result=on_zdjecie_wybrane)
-    page.overlay.append(picker)
-
-    def wybierz_zdjecie(e):
-        picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
-
-    btn_foto = ft.ElevatedButton(
+    btn_foto = ft.Button(
         content=ft.Row(
             [ft.Icon(ft.Icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie faktury")],
             alignment=ft.MainAxisAlignment.CENTER
@@ -434,7 +480,7 @@ async def main(page: ft.Page):
         if aktualne_zdjecie["sciezka"]:
             await przetworz_plik(aktualne_zdjecie["sciezka"])
 
-    btn_ponow = ft.ElevatedButton(
+    btn_ponow = ft.Button(
         content=ft.Row(
             [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij ponownie do analizy")],
             alignment=ft.MainAxisAlignment.CENTER
@@ -452,7 +498,7 @@ async def main(page: ft.Page):
     async def klik_udostepnij(e):
         await udostepnij_plik(ostatnia_sciezka_edi["sciezka"])
 
-    btn_udostepnij = ft.ElevatedButton(
+    btn_udostepnij = ft.Button(
         content=ft.Row(
             [ft.Icon(ft.Icons.SHARE), ft.Text("Udostępnij plik EDI")],
             alignment=ft.MainAxisAlignment.CENTER
@@ -467,7 +513,7 @@ async def main(page: ft.Page):
         on_click=klik_udostepnij
     )
 
-    btn_wol = ft.ElevatedButton(
+    btn_wol = ft.Button(
         content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
         style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
         on_click=klik_budzenie_wol
@@ -514,4 +560,4 @@ async def main(page: ft.Page):
     )
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)

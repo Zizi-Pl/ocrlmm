@@ -5,7 +5,8 @@ description = "Skaner PZ do EDI"
 requires-python = ">=3.11"
 dependencies = [
     "flet==0.85.3",
-    "openai",
+    "httpx",
+    "Pillow"
 ]
 
 [tool.flet]
@@ -21,3 +22,4 @@ path = "."
 "android.permission.INTERNET" = true
 "android.permission.CAMERA" = true
 "android.permission.READ_MEDIA_IMAGES" = true
+"android.permission.READ_EXTERNAL_STORAGE" = true
