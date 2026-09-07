@@ -627,6 +627,7 @@ async def main(page: ft.Page):
                 "Content-Type": "application/json"
             }
 
+            # Bazowe ciało zapytania wspólne dla obu silników
             cialo_zapytania = {
                 "model": wybrany_model,
                 "messages": [{
@@ -637,8 +638,12 @@ async def main(page: ft.Page):
                     ]
                 }],
                 "temperature": 0.0,
-                "response_format": {"type": "json_object"}
+                "max_tokens": 2500
             }
+
+            # Google API wymaga json_object; LM Studio odrzuca ten parametr błędem 400
+            if uzywa_chmury:
+                cialo_zapytania["response_format"] = {"type": "json_object"}
 
             max_prob = 4
             opoznienie_poczatkowe = 2.0
