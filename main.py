@@ -237,7 +237,7 @@ async def main(page: ft.Page):
     tytul_bledu = ft.Text("Komunikat", weight=ft.FontWeight.BOLD)
 
     def zamknij_alert(e):
-        page.close(dlg_alert)
+        page.pop_dialog()
 
     dlg_alert = ft.AlertDialog(
         title=tytul_bledu,
@@ -250,7 +250,7 @@ async def main(page: ft.Page):
     def pokaz_okno_bledu(tytul: str, wiadomosc: str):
         tytul_bledu.value = tytul
         tresc_bledu.value = wiadomosc
-        page.open(dlg_alert)
+        page.show_dialog(dlg_alert)
 
     chk_cloud = ft.Checkbox(
         label="Użyj chmury (Google Gemini)",
@@ -451,7 +451,7 @@ async def main(page: ft.Page):
     wiersz_obrotu = ft.Row([btn_obroc_lewo, btn_obroc_prawo], visible=False, spacing=10)
 
     def zamknij_dialog(e):
-        page.close(dlg_ustawienia)
+        page.pop_dialog()
 
     def zapisz_i_zamknij_dialog(e):
         konfig["use_cloud"] = chk_cloud.value
@@ -471,7 +471,7 @@ async def main(page: ft.Page):
         konfig["local_api_key"] = txt_local_api_key.value.strip()
         
         zapisz_konfiguracje(konfig)
-        page.close(dlg_ustawienia)
+        page.pop_dialog()
         status_text.value = "Ustawienia zostały zapisane."
         status_text.color = ft.Colors.CYAN_ACCENT
         page.update()
@@ -500,10 +500,10 @@ async def main(page: ft.Page):
     )
 
     def otworz_ustawienia(e):
-        page.open(dlg_ustawienia)
+        page.show_dialog(dlg_ustawienia)
 
     serwis_udostepniania = ft.Share()
-    page.overlay.append(serwis_udostepniania)
+    page.services.append(serwis_udostepniania)
 
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
@@ -708,23 +708,28 @@ async def main(page: ft.Page):
             wiersz_obrotu.visible = True
             page.update()
 
+    # Inicjalizacja FilePickera jako service (Flet >=0.80): rejestracja w page.services,
+    # a wynik wyboru pliku odczytywany bezpośrednio z await picker.pick_files(...)
     picker = ft.FilePicker()
-    page.overlay.append(picker)
+    page.services.append(picker)
 
     async def wybierz_zdjecie(e):
         try:
-            wynik = await picker.pick_files_async(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
-            
-            if wynik and len(wynik) > 0:
-                wybrany = wynik[0].path
-                aktualne_zdjecie["sciezka"] = wybrany
-                podglad_obrazu.src = wybrany
-                podglad_obrazu.visible = True
-                btn_usun_zdjecie.visible = True
-                wiersz_obrotu.visible = True
-                btn_ponow.visible = True
-                page.update()
-                await przetworz_plik(wybrany)
+            pliki = await picker.pick_files(
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.IMAGE
+            )
+            if pliki and len(pliki) > 0:
+                wybrany = pliki[0].path
+                if wybrany:
+                    aktualne_zdjecie["sciezka"] = wybrany
+                    podglad_obrazu.src = wybrany
+                    podglad_obrazu.visible = True
+                    btn_usun_zdjecie.visible = True
+                    wiersz_obrotu.visible = True
+                    btn_ponow.visible = True
+                    page.update()
+                    asyncio.create_task(przetworz_plik(wybrany))
         except Exception as e_pick:
             status_text.value = f"Błąd wyboru pliku: {e_pick}"
             page.update()
