@@ -8,7 +8,7 @@ import re
 import io
 import httpx
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 from thefuzz import process, fuzz
 
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
@@ -39,9 +39,21 @@ def wczytaj_baze_pcmarket() -> list[dict]:
             sciezka = sciezka_lokalna
 
     if os.path.exists(sciezka):
+        kodowania = ["windows-1250", "utf-8", "cp852"]
+        linie = None
+        
+        for enc in kodowania:
+            try:
+                with open(sciezka, "r", encoding=enc) as f:
+                    linie = f.readlines()
+                break
+            except UnicodeDecodeError:
+                continue
+                
+        if not linie:
+            return towary
+
         try:
-            with open(sciezka, "r", encoding="utf-8", errors="ignore") as f:
-                linie = f.readlines()
             for linia in linie:
                 kolumny = linia.strip().split("\t")
                 if len(kolumny) >= 3:
@@ -53,7 +65,7 @@ def wczytaj_baze_pcmarket() -> list[dict]:
                             "kod_wew": kod
                         })
         except Exception as e:
-            print(f"Błąd odczytu bazy PC-Market: {e}")
+            print(f"Błąd parsowania bazy PC-Market: {e}")
     return towary
 
 def dopasuj_towar_z_bazy(nazwa_faktura: str, kod_faktura: str, baza: list[dict], uzywaj_bazy: bool) -> tuple[str, str]:
@@ -65,6 +77,9 @@ def dopasuj_towar_z_bazy(nazwa_faktura: str, kod_faktura: str, baza: list[dict],
 
     if baza and nazwa_faktura_clean:
         mapa_nazw = {t["nazwa"]: t["kod_wew"] for t in baza}
+        if nazwa_faktura_clean in mapa_nazw:
+            return mapa_nazw[nazwa_faktura_clean], kod_faktura_clean
+
         najlepsza_nazwa, wynik = process.extractOne(
             nazwa_faktura_clean, 
             mapa_nazw.keys(), 
@@ -118,32 +133,11 @@ def generuj_tekst_edi(dane: dict, uzywaj_bazy: bool) -> str:
 
     linie = [
         "TypPolskichLiter:LA",
-        "TypDok:FW",
+        "TypDok:PZ",
         f"NrDok:{dane.get('nr_dok', '')}",
         f"Data:{dane.get('data', datetime.now().strftime('%d.%m.%Y'))}",
-        f"SposobPlatn:{dane.get('sposob_platnosci', 'PRZEL')}",
-        f"TerminPlatn:{dane.get('termin_platnosci_dni', '14')}",
-        "IndeksCentralny:SWW",
-        f"NazwaWystawcy:{wyst.get('nazwa', '')}",
-        f"AdresWystawcy:{wyst.get('adres', '')}",
-        f"KodWystawcy:{wyst.get('kod', '')}",
-        f"MiastoWystawcy:{wyst.get('miasto', '')}",
-        f"UlicaWystawcy:{wyst.get('ulica', '')}",
+        "Magazyn:MAGAZYN",
         f"NIPWystawcy:{nip_wyst}",
-        "BankWystawcy:",
-        "KontoWystawcy:",
-        "TelefonWystawcy:",
-        "NrWystawcyWSieciSklepow:0",
-        f"NazwaOdbiorcy:{odb.get('nazwa', '')}",
-        f"AdresOdbiorcy:{odb.get('adres', '')}",
-        f"KodOdbiorcy:{odb.get('kod', '')}",
-        f"MiastoOdbiorcy:{odb.get('miasto', '')}",
-        f"UlicaOdbiorcy:{odb.get('ulica', '')}",
-        f"NIPOdbiorcy:{nip_odb}",
-        "BankOdbiorcy:",
-        "KontoOdbiorcy:",
-        "TelefonOdbiorcy:",
-        "NrOdbiorcyWSieciSklepow:0",
         f"IloscLinii:{len(pozycje)}"
     ]
 
@@ -160,8 +154,6 @@ def generuj_tekst_edi(dane: dict, uzywaj_bazy: bool) -> str:
             vat = "5"
 
         jm = str(poz.get("jm", "kg")).lower().strip()
-        asort = poz.get("asortyment", "")
-        pkwiu = poz.get("pkwiu", "")
         
         ilosc = str(poz.get("ilosc", "1")).replace(",", ".").strip()
         cena = str(poz.get("cena_netto", "0.00")).replace(",", ".").strip()
@@ -174,23 +166,10 @@ def generuj_tekst_edi(dane: dict, uzywaj_bazy: bool) -> str:
 
         linia = (
             f"Linia:Nazwa{{{nazwa}}}Kod{{{kod_glowny}}}Vat{{{vat}}}Jm{{{jm}}}"
-            f"Asortyment{{{asort}}}Sww{{        }}PKWiU{{{pkwiu}}}"
-            f"Ilosc{{{ilosc}}}Cena{{{cena}}}Wartosc{{{wartosc}}}CenaSp{{}}Kod1{{{kod_dodatkowy}}}"
+            f"Ilosc{{{ilosc}}}Cena{{{cena}}}Wartosc{{{wartosc}}}"
         )
         linie.append(linia)
 
-    for st in stawki:
-        vat_st_raw = str(st.get("vat", "5")).replace("%", "").replace(",", ".").strip()
-        try:
-            vat_st = str(int(float(vat_st_raw)))
-        except Exception:
-            vat_st = "5"
-            
-        s_netto = str(st.get("suma_netto", "0.00")).replace(",", ".").strip()
-        s_vat = str(st.get("suma_vat", "0.00")).replace(",", ".").strip()
-        linie.append(f"Stawka:Vat{{{vat_st}}}SumaNet{{{s_netto}}}SumaVat{{{s_vat}}}")
-
-    linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.').strip()}")
     return "\n".join(linie) + "\n"
 
 def weryfikuj_sumy_netto(dane: dict) -> tuple[bool, str]:
@@ -222,9 +201,8 @@ def weryfikuj_sumy_netto(dane: dict) -> tuple[bool, str]:
         roznica = abs(suma_obliczona - suma_odczytana)
         if roznica > 0.10:
             komunikat = (
-                f"⚠️ Ostrzeżenie: Niezgodność sumy netto!\n"
-                f"Suma pozycji: {suma_obliczona:.2f} zł | Z dokumentu: {suma_odczytana:.2f} zł\n"
-                f"Różnica: {roznica:.2f} zł."
+                f"⚠️ Niezgodność sumy netto!\n"
+                f"Suma pozycji: {suma_obliczona:.2f} | Z dokumentu: {suma_odczytana:.2f}"
             )
             return False, komunikat
 
@@ -235,6 +213,11 @@ def kompresuj_do_base64(sciezka_pliku: str) -> str:
         img.thumbnail((2600, 2600))
         if img.mode != "RGB":
             img = img.convert("RGB")
+        
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.8)
+        img = img.filter(ImageFilter.SHARPEN)
+
         bufor = io.BytesIO()
         img.save(bufor, format="JPEG", quality=92)
         return base64.b64encode(bufor.getvalue()).decode("utf-8")
@@ -254,8 +237,7 @@ async def main(page: ft.Page):
     tytul_bledu = ft.Text("Komunikat", weight=ft.FontWeight.BOLD)
 
     def zamknij_alert(e):
-        dlg_alert.open = False
-        page.update()
+        page.close(dlg_alert)
 
     dlg_alert = ft.AlertDialog(
         title=tytul_bledu,
@@ -264,13 +246,11 @@ async def main(page: ft.Page):
             ft.Button(content=ft.Text("Rozumiem"), on_click=zamknij_alert)
         ]
     )
-    page.overlay.append(dlg_alert)
 
     def pokaz_okno_bledu(tytul: str, wiadomosc: str):
         tytul_bledu.value = tytul
         tresc_bledu.value = wiadomosc
-        dlg_alert.open = True
-        page.update()
+        page.open(dlg_alert)
 
     chk_cloud = ft.Checkbox(
         label="Użyj chmury (Google Gemini)",
@@ -348,7 +328,7 @@ async def main(page: ft.Page):
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: wyslij_wol(txt_mac.value.strip()))
-            status_text.value = "Pakiet Wake-on-LAN wysłany. Serwer się uruchamia."
+            status_text.value = "Pakiet Wake-on-LAN wysłany."
             status_text.color = ft.Colors.CYAN_ACCENT
         except Exception as err_wol:
             status_text.value = f"Błąd WoL: {err_wol}"
@@ -471,8 +451,7 @@ async def main(page: ft.Page):
     wiersz_obrotu = ft.Row([btn_obroc_lewo, btn_obroc_prawo], visible=False, spacing=10)
 
     def zamknij_dialog(e):
-        dlg_ustawienia.open = False
-        page.update()
+        page.close(dlg_ustawienia)
 
     def zapisz_i_zamknij_dialog(e):
         konfig["use_cloud"] = chk_cloud.value
@@ -492,7 +471,7 @@ async def main(page: ft.Page):
         konfig["local_api_key"] = txt_local_api_key.value.strip()
         
         zapisz_konfiguracje(konfig)
-        dlg_ustawienia.open = False
+        page.close(dlg_ustawienia)
         status_text.value = "Ustawienia zostały zapisane."
         status_text.color = ft.Colors.CYAN_ACCENT
         page.update()
@@ -519,17 +498,12 @@ async def main(page: ft.Page):
             )
         ]
     )
-    page.overlay.append(dlg_ustawienia)
 
     def otworz_ustawienia(e):
-        dlg_ustawienia.open = True
-        page.update()
+        page.open(dlg_ustawienia)
 
     serwis_udostepniania = ft.Share()
-    if hasattr(page, "services"):
-        page.services.append(serwis_udostepniania)
-    else:
-        page.overlay.append(serwis_udostepniania)
+    page.overlay.append(serwis_udostepniania)
 
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
@@ -601,28 +575,25 @@ async def main(page: ft.Page):
                 wybrany_model = konfig.get("local_model", "qwen3-vl-4b-instruct").strip()
 
             prompt = (
-                "Jesteś precyzyjnym skanerem OCR faktur i specyfikacji mięsnych. "
-                "Przepisz DOKŁADNIE tekst ze zdjęcia dokumentu. Nie zmyślaj żadnych danych!\n\n"
-                "Instrukcje dotyczące pól:\n"
-                "1. Nagłówek: odczytaj numer dokumentu (nr_dok).\n"
-                "2. Wystawca i Odbiorca: przepisz nazwy, adresy, kody, miasta i NIP.\n"
-                "3. Tabela towarowa: Przepisz DOKŁADNIE każdy wiersz z tabeli:\n"
-                "   - nazwa: nazwa towaru\n"
+                "Jesteś precyzyjnym systemem OCR do faktur, specyfikacji mięsnych i dokumentów PZ. "
+                "Przepisz DOKŁADNIE dane ze zdjęcia dokumentu. Nie zmyślaj żadnych danych ani towarów!\n\n"
+                "Instrukcje:\n"
+                "1. Nagłówek: odczytaj numer dokumentu (nr_dok), datę oraz dane wystawcy i odbiorcy (NIP).\n"
+                "2. Tabela towarowa: Przepisz DOKŁADNIE każdy wiersz z tabeli:\n"
+                "   - nazwa: pełna nazwa towaru\n"
                 "   - kod: kod towaru / CN / Nr D-t\n"
-                "   - ilosc: waga/ilość\n"
-                "   - jm: jednostka (np. kg)\n"
+                "   - ilosc: waga / ilość\n"
+                "   - jm: jednostka miary (np. kg)\n"
                 "   - cena_netto: cena netto po rabacie\n"
-                "   - wartosc_netto: wartość netto danej pozycji\n"
+                "   - wartosc_netto: wartość netto pozycji\n"
                 "   - vat: stawka VAT (np. 5 lub 23)\n"
-                "4. Podsumowanie: odczytaj 'Razem netto' (suma_netto_dokument), stawki VAT oraz kwotę do_zaplaty.\n\n"
-                "Zwróć TYLKO czysty JSON zgodny ze strukturą:\n"
+                "3. Podsumowanie: odczytaj 'Razem netto' (suma_netto_dokument) oraz stawki VAT i do_zaplaty.\n\n"
+                "Zwróć TYLKO czysty obiekt JSON zgodny ze strukturą:\n"
                 "{\n"
                 "  \"nr_dok\": \"...\",\n"
                 "  \"data\": \"DD.MM.RRRR\",\n"
-                "  \"termin_platnosci_dni\": \"14\",\n"
-                "  \"sposob_platnosci\": \"PRZEL\",\n"
-                "  \"wystawca\": {\"nazwa\": \"...\", \"nip\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\"},\n"
-                "  \"odbiorca\": {\"nazwa\": \"...\", \"nip\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\"},\n"
+                "  \"wystawca\": {\"nazwa\": \"...\", \"nip\": \"...\"},\n"
+                "  \"odbiorca\": {\"nazwa\": \"...\", \"nip\": \"...\"},\n"
                 "  \"pozycje\": [\n"
                 "    {\"nazwa\": \"...\", \"kod\": \"...\", \"vat\": \"5\", \"jm\": \"kg\", \"ilosc\": \"0.000\", \"cena_netto\": \"0.00\", \"wartosc_netto\": \"0.00\"}\n"
                 "  ],\n"
@@ -639,7 +610,6 @@ async def main(page: ft.Page):
             if klucz:
                 naglowki["Authorization"] = f"Bearer {klucz}"
 
-            # Bazowe ciało zapytania wspólne dla obu silników
             cialo_zapytania = {
                 "model": wybrany_model,
                 "messages": [{
@@ -653,7 +623,6 @@ async def main(page: ft.Page):
                 "max_tokens": 2500
             }
 
-            # Google API wymaga json_object; LM Studio odrzuca ten parametr błędem 400
             if uzywa_chmury:
                 cialo_zapytania["response_format"] = {"type": "json_object"}
 
@@ -720,41 +689,16 @@ async def main(page: ft.Page):
 
         except Exception as err:
             komunikat = str(err)
-            
             if "503" in komunikat:
-                pokaz_okno_bledu(
-                    "⏳ Serwer Gemini jest przeciążony",
-                    "Mimo 4 prób serwery Google były przeciążone (błąd 503).\n\n"
-                    "Odczekaj kilkanaście sekund i kliknij 'Wyślij do analizy'."
-                )
-                status_text.value = "Serwer Gemini jest przeciążony (503). Spróbuj za chwilę."
+                pokaz_okno_bledu("⏳ Serwer Gemini przeciążony", "Odczekaj chwilę i kliknij przycisk odświeżenia/analizy ponownie.")
             elif "429" in komunikat:
-                pokaz_okno_bledu(
-                    "⏳ Przekroczono limit zapytań (429)",
-                    "Darmowy limit zapytań na minutę został wyczerpany. Odczekaj chwilę."
-                )
-                status_text.value = "Limit zapytań osiągnięty (429). Odczekaj 30 sekund."
-            elif "401" in komunikat or "unauthorized" in komunikat.lower():
-                pokaz_okno_bledu(
-                    "🔑 Błąd autoryzacji (401)",
-                    "Klucz API jest nieprawidłowy lub wygasł.\nSprawdź klucz w ustawieniach (zębatka)."
-                )
-                status_text.value = "Błąd 401: Sprawdź klucz API w ustawieniach."
-            elif "timeout" in komunikat.lower() or "timed out" in komunikat.lower():
-                pokaz_okno_bledu(
-                    "⏱️ Przekroczono czas oczekiwania",
-                    "Serwer nie odpowiedział w ciągu 90 sekund. Sprawdź jakość połączenia internetowego."
-                )
-                status_text.value = "Błąd: Przekroczono limit czasu (Timeout)."
-            elif "connect" in komunikat.lower() or "refused" in komunikat.lower():
-                pokaz_okno_bledu(
-                    "🔌 Brak połączenia",
-                    "Nie udało się połączyć z podanym adresem. Upewnij się, że masz połączenie z siecią."
-                )
-                status_text.value = "Błąd połączenia z serwerem."
+                pokaz_okno_bledu("⏳ Limit zapytań wyczerpany", "Zbyt wiele zapytań w krótkim czasie. Odczekaj 30 sekund.")
+            elif "401" in komunikat:
+                pokaz_okno_bledu("🔑 Błąd autoryzacji", "Sprawdź poprawność klucza API w ustawieniach (zębatka).")
             else:
-                status_text.value = f"Błąd: {komunikat}"
+                pokaz_okno_bledu("❌ Błąd przetwarzania", komunikat)
             
+            status_text.value = f"Błąd: {komunikat}"
             status_text.color = ft.Colors.RED_ACCENT
             btn_ponow.visible = True
         finally:
@@ -765,18 +709,14 @@ async def main(page: ft.Page):
             page.update()
 
     picker = ft.FilePicker()
-    if hasattr(page, "services"):
-        page.services.append(picker)
-    else:
-        page.overlay.append(picker)
+    page.overlay.append(picker)
 
     async def wybierz_zdjecie(e):
         try:
-            wynik = picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
-            pliki = await wynik if asyncio.iscoroutine(wynik) else wynik
-
-            if pliki and len(pliki) > 0:
-                wybrany = pliki[0].path
+            wynik = await picker.pick_files_async(allow_multiple=False, file_type=ft.FilePickerFileType.IMAGE)
+            
+            if wynik and len(wynik) > 0:
+                wybrany = wynik[0].path
                 aktualne_zdjecie["sciezka"] = wybrany
                 podglad_obrazu.src = wybrany
                 podglad_obrazu.visible = True
@@ -809,7 +749,7 @@ async def main(page: ft.Page):
 
     btn_ponow = ft.Button(
         content=ft.Row(
-            [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij do analizy")],
+            [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij do analizy / Odśwież")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         visible=False,
