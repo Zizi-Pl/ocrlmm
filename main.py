@@ -9,22 +9,70 @@ import io
 import httpx
 from datetime import datetime
 from PIL import Image
+from thefuzz import process, fuzz
 
-# Katalog trwałego przechowywania danych aplikacji na pliki EDI (Android/iOS)
 KATALOG_DANYCH = os.getenv("FLET_APP_STORAGE_DATA", os.getcwd())
 os.makedirs(KATALOG_DANYCH, exist_ok=True)
 
 CONFIG_FILE = os.path.join(KATALOG_DANYCH, "ocrlmm_mobile_config.json")
+BAZA_TOWAROWA_FILE = os.path.join(KATALOG_DANYCH, "WĘDLINA.txt")
 
 DOMYSLNA_KONFIGURACJA = {
     "wol_mac": "2C:F0:5D:E4:8E:85",
-    "serwer_ip": "192.168.1.154",
-    "serwer_port": "1234",
-    "api_key": "sk-lm-local",
-    "model_name": "google/gemma-3-4b",
-    "use_custom_url": False,
-    "custom_base_url": "https://api.openai.com/v1"
+    "use_cloud": True,
+    "use_db_matching": True,
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
+    "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "local_ip": "192.168.1.154",
+    "local_port": "1234",
+    "local_model": "qwen3-vl-4b-instruct"
 }
+
+def wczytaj_baze_pcmarket() -> list[dict]:
+    towary = []
+    sciezka = BAZA_TOWAROWA_FILE
+    if not os.path.exists(sciezka):
+        sciezka_lokalna = os.path.join(os.getcwd(), "WĘDLINA.txt")
+        if os.path.exists(sciezka_lokalna):
+            sciezka = sciezka_lokalna
+
+    if os.path.exists(sciezka):
+        try:
+            with open(sciezka, "r", encoding="utf-8", errors="ignore") as f:
+                linie = f.readlines()
+            for linia in linie:
+                kolumny = linia.strip().split("\t")
+                if len(kolumny) >= 3:
+                    nazwa = kolumny[0].strip().upper()
+                    kod = kolumny[2].strip().lstrip("'")
+                    if nazwa and kod and nazwa != "NAZWA":
+                        towary.append({
+                            "nazwa": nazwa,
+                            "kod_wew": kod
+                        })
+        except Exception as e:
+            print(f"Błąd odczytu bazy PC-Market: {e}")
+    return towary
+
+def dopasuj_towar_z_bazy(nazwa_faktura: str, kod_faktura: str, baza: list[dict], uzywaj_bazy: bool) -> tuple[str, str]:
+    kod_faktura_clean = kod_faktura.strip()
+    nazwa_faktura_clean = nazwa_faktura.strip().upper()
+
+    if not uzywaj_bazy:
+        return kod_faktura_clean, ""
+
+    if baza and nazwa_faktura_clean:
+        mapa_nazw = {t["nazwa"]: t["kod_wew"] for t in baza}
+        najlepsza_nazwa, wynik = process.extractOne(
+            nazwa_faktura_clean, 
+            mapa_nazw.keys(), 
+            scorer=fuzz.token_set_ratio
+        )
+        if wynik >= 65:
+            return mapa_nazw[najlepsza_nazwa], kod_faktura_clean
+
+    return kod_faktura_clean, ""
 
 def wczytaj_konfiguracje() -> dict:
     if os.path.exists(CONFIG_FILE):
@@ -48,7 +96,7 @@ def zapisz_konfiguracje(konf: dict):
 def wyslij_wol(mac_address: str):
     czysty_mac = mac_address.replace(":", "").replace("-", "").replace(".", "")
     if len(czysty_mac) != 12:
-        raise ValueError("Nieprawidłowy format adresu MAC (wymagane 12 znaków hex).")
+        raise ValueError("Nieprawidłowy format adresu MAC.")
 
     dane_mac = bytes.fromhex(czysty_mac)
     magic_packet = b"\xff" * 6 + dane_mac * 16
@@ -57,11 +105,15 @@ def wyslij_wol(mac_address: str):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.sendto(magic_packet, ("<broadcast>", 9))
 
-def generuj_tekst_edi(dane: dict) -> str:
+def generuj_tekst_edi(dane: dict, uzywaj_bazy: bool) -> str:
+    baza_towarowa = wczytaj_baze_pcmarket() if uzywaj_bazy else []
     pozycje = dane.get("pozycje", [])
     wyst = dane.get("wystawca", {})
     odb = dane.get("odbiorca", {})
     stawki = dane.get("stawki", [])
+
+    nip_wyst = re.sub(r"\D", "", str(wyst.get("nip", "")))
+    nip_odb = re.sub(r"\D", "", str(odb.get("nip", "")))
 
     linie = [
         "TypPolskichLiter:LA",
@@ -76,9 +128,9 @@ def generuj_tekst_edi(dane: dict) -> str:
         f"KodWystawcy:{wyst.get('kod', '')}",
         f"MiastoWystawcy:{wyst.get('miasto', '')}",
         f"UlicaWystawcy:{wyst.get('ulica', '')}",
-        f"NIPWystawcy:{wyst.get('nip', '')}",
-        f"BankWystawcy:{wyst.get('bank', '')}",
-        f"KontoWystawcy:{wyst.get('konto', '')}",
+        f"NIPWystawcy:{nip_wyst}",
+        "BankWystawcy:",
+        "KontoWystawcy:",
         "TelefonWystawcy:",
         "NrWystawcyWSieciSklepow:0",
         f"NazwaOdbiorcy:{odb.get('nazwa', '')}",
@@ -86,7 +138,7 @@ def generuj_tekst_edi(dane: dict) -> str:
         f"KodOdbiorcy:{odb.get('kod', '')}",
         f"MiastoOdbiorcy:{odb.get('miasto', '')}",
         f"UlicaOdbiorcy:{odb.get('ulica', '')}",
-        f"NIPOdbiorcy:{odb.get('nip', '')}",
+        f"NIPOdbiorcy:{nip_odb}",
         "BankOdbiorcy:",
         "KontoOdbiorcy:",
         "TelefonOdbiorcy:",
@@ -95,15 +147,24 @@ def generuj_tekst_edi(dane: dict) -> str:
     ]
 
     for poz in pozycje:
-        nazwa = poz.get("nazwa", "")
-        kod = poz.get("kod", "")
-        vat = poz.get("vat", "23")
-        jm = poz.get("jm", "szt")
+        nazwa = str(poz.get("nazwa", "")).strip().upper()
+        kod_faktura = str(poz.get("kod", "")).strip()
+
+        kod_glowny, kod_dodatkowy = dopasuj_towar_z_bazy(nazwa, kod_faktura, baza_towarowa, uzywaj_bazy)
+
+        vat_raw = str(poz.get("vat", "5")).replace("%", "").replace(",", ".").strip()
+        try:
+            vat = str(int(float(vat_raw)))
+        except Exception:
+            vat = "5"
+
+        jm = str(poz.get("jm", "kg")).lower().strip()
         asort = poz.get("asortyment", "")
         pkwiu = poz.get("pkwiu", "")
-        ilosc = poz.get("ilosc", "1")
-        cena = str(poz.get("cena_netto", "0.00")).replace(",", ".")
-        wartosc = str(poz.get("wartosc_netto", "0.00")).replace(",", ".")
+        
+        ilosc = str(poz.get("ilosc", "1")).replace(",", ".").strip()
+        cena = str(poz.get("cena_netto", "0.00")).replace(",", ".").strip()
+        wartosc = str(poz.get("wartosc_netto", "0.00")).replace(",", ".").strip()
 
         if not cena.startswith("n"):
             cena = f"n{cena}"
@@ -111,28 +172,70 @@ def generuj_tekst_edi(dane: dict) -> str:
             wartosc = f"n{wartosc}"
 
         linia = (
-            f"Linia:Nazwa{{{nazwa}}}Kod{{{kod}}}Vat{{{vat}}}Jm{{{jm}}}"
+            f"Linia:Nazwa{{{nazwa}}}Kod{{{kod_glowny}}}Vat{{{vat}}}Jm{{{jm}}}"
             f"Asortyment{{{asort}}}Sww{{        }}PKWiU{{{pkwiu}}}"
-            f"Ilosc{{{ilosc}}}Cena{{{cena}}}Wartosc{{{wartosc}}}CenaSp{{}}Kod1{{}}"
+            f"Ilosc{{{ilosc}}}Cena{{{cena}}}Wartosc{{{wartosc}}}CenaSp{{}}Kod1{{{kod_dodatkowy}}}"
         )
         linie.append(linia)
 
     for st in stawki:
-        vat = st.get("vat", "23")
-        s_netto = str(st.get("suma_netto", "0.00")).replace(",", ".")
-        s_vat = str(st.get("suma_vat", "0.00")).replace(",", ".")
-        linie.append(f"Stawka:Vat{{{vat}}}SumaNet{{{s_netto}}}SumaVat{{{s_vat}}}")
+        vat_st_raw = str(st.get("vat", "5")).replace("%", "").replace(",", ".").strip()
+        try:
+            vat_st = str(int(float(vat_st_raw)))
+        except Exception:
+            vat_st = "5"
+            
+        s_netto = str(st.get("suma_netto", "0.00")).replace(",", ".").strip()
+        s_vat = str(st.get("suma_vat", "0.00")).replace(",", ".").strip()
+        linie.append(f"Stawka:Vat{{{vat_st}}}SumaNet{{{s_netto}}}SumaVat{{{s_vat}}}")
 
-    linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.')}")
+    linie.append(f"DoZaplaty:{str(dane.get('do_zaplaty', '0.00')).replace(',', '.').strip()}")
     return "\n".join(linie) + "\n"
+
+def weryfikuj_sumy_netto(dane: dict) -> tuple[bool, str]:
+    pozycje = dane.get("pozycje", [])
+    suma_obliczona = 0.0
+    
+    for poz in pozycje:
+        try:
+            val_raw = str(poz.get("wartosc_netto", "0.00")).replace(",", ".").replace("n", "").strip()
+            suma_obliczona += float(val_raw)
+        except Exception:
+            pass
+
+    suma_doc_raw = str(dane.get("suma_netto_dokument", "")).replace(",", ".").strip()
+    
+    if not suma_doc_raw or suma_doc_raw == "0.00":
+        try:
+            stawki = dane.get("stawki", [])
+            suma_doc_raw = str(sum(float(str(s.get("suma_netto", 0)).replace(",", ".")) for s in stawki))
+        except Exception:
+            suma_doc_raw = "0.00"
+
+    try:
+        suma_odczytana = float(suma_doc_raw)
+    except Exception:
+        suma_odczytana = 0.0
+
+    if suma_odczytana > 0.0:
+        roznica = abs(suma_obliczona - suma_odczytana)
+        if roznica > 0.10:
+            komunikat = (
+                f"⚠️ Ostrzeżenie: Niezgodność sumy netto!\n"
+                f"Suma pozycji: {suma_obliczona:.2f} zł | Z dokumentu: {suma_odczytana:.2f} zł\n"
+                f"Różnica: {roznica:.2f} zł."
+            )
+            return False, komunikat
+
+    return True, f"Zgodność sumy netto: {suma_obliczona:.2f} zł"
 
 def kompresuj_do_base64(sciezka_pliku: str) -> str:
     with Image.open(sciezka_pliku) as img:
-        img.thumbnail((1600, 1600))
+        img.thumbnail((2600, 2600))
         if img.mode != "RGB":
             img = img.convert("RGB")
         bufor = io.BytesIO()
-        img.save(bufor, format="JPEG", quality=85)
+        img.save(bufor, format="JPEG", quality=92)
         return base64.b64encode(bufor.getvalue()).decode("utf-8")
 
 async def main(page: ft.Page):
@@ -146,39 +249,160 @@ async def main(page: ft.Page):
     ostatnia_sciezka_edi = {"sciezka": None}
     aktualne_zdjecie = {"sciezka": None}
 
-    txt_mac = ft.TextField(label="Adres MAC (Wake-on-LAN)", value=konfig["wol_mac"], dense=True)
-    txt_ip = ft.TextField(label="IP Serwera LM Studio", value=konfig["serwer_ip"], dense=True)
-    txt_port = ft.TextField(label="Port LM Studio", value=konfig["serwer_port"], dense=True)
-    txt_model = ft.TextField(label="Identyfikator modelu", value=konfig["model_name"], dense=True)
-    txt_api_key = ft.TextField(
-        label="Klucz API",
-        value=konfig["api_key"],
+    tresc_bledu = ft.Text("", size=14)
+    tytul_bledu = ft.Text("Komunikat", weight=ft.FontWeight.BOLD)
+
+    def zamknij_alert(e):
+        dlg_alert.open = False
+        page.update()
+
+    dlg_alert = ft.AlertDialog(
+        title=tytul_bledu,
+        content=tresc_bledu,
+        actions=[
+            ft.Button(content=ft.Text("Rozumiem"), on_click=zamknij_alert)
+        ]
+    )
+    page.overlay.append(dlg_alert)
+
+    def pokaz_okno_bledu(tytul: str, wiadomosc: str):
+        tytul_bledu.value = tytul
+        tresc_bledu.value = wiadomosc
+        dlg_alert.open = True
+        page.update()
+
+    chk_cloud = ft.Checkbox(
+        label="Użyj chmury (Google Gemini)",
+        value=konfig.get("use_cloud", True)
+    )
+
+    chk_db_matching = ft.Checkbox(
+        label="Dopasowuj do bazy PC-Market (WĘDLINA.txt)",
+        value=konfig.get("use_db_matching", True)
+    )
+
+    txt_gemini_key = ft.TextField(
+        label="Klucz Google AI Studio API",
+        value=konfig.get("gemini_api_key", ""),
         password=True,
         can_reveal_password=True,
         dense=True
     )
 
-    chk_custom = ft.Checkbox(value=konfig["use_custom_url"])
-    wiersz_chmura = ft.Row([
-        chk_custom,
-        ft.Text("Użyj niestandardowego URL", expand=True)
-    ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    znane_modele = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    aktualny_model = konfig.get("gemini_model", "gemini-2.5-flash")
 
-    txt_custom_url = ft.TextField(
-        label="Niestandardowy Base URL",
-        value=konfig["custom_base_url"],
-        visible=konfig["use_custom_url"],
+    czy_niestandardowy = aktualny_model not in znane_modele
+    wybrana_wartosc_dd = "custom" if czy_niestandardowy else aktualny_model
+
+    txt_custom_model = ft.TextField(
+        label="Wpisz nazwę własnego modelu",
+        value=aktualny_model if czy_niestandardowy else "",
+        visible=czy_niestandardowy,
         dense=True
     )
 
-    def zmien_chk_custom(e):
-        txt_custom_url.visible = chk_custom.value
+    dd_gemini_model = ft.Dropdown(
+        label="Model Gemini",
+        value=wybrana_wartosc_dd,
+        options=[
+            ft.dropdown.Option("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            ft.dropdown.Option("gemini-3.6-flash", "Gemini 3.6 Flash"),
+            ft.dropdown.Option("gemini-2.0-flash", "Gemini 2.0 Flash"),
+            ft.dropdown.Option("gemini-1.5-flash", "Gemini 1.5 Flash"),
+            ft.dropdown.Option("custom", "Inny / własny model..."),
+        ],
+        dense=True
+    )
+
+    def zmien_model_dropdown(e):
+        txt_custom_model.visible = (dd_gemini_model.value == "custom")
         page.update()
 
-    chk_custom.on_change = zmien_chk_custom
+    dd_gemini_model.on_change = zmien_model_dropdown
+
+    txt_gemini_url = ft.TextField(
+        label="Base URL Gemini",
+        value=konfig.get("gemini_base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
+        dense=True
+    )
+
+    txt_mac = ft.TextField(label="Adres MAC (Wake-on-LAN)", value=konfig.get("wol_mac", ""), dense=True)
+    txt_ip = ft.TextField(label="IP Serwera LM Studio", value=konfig.get("local_ip", "192.168.1.154"), dense=True)
+    txt_port = ft.TextField(label="Port LM Studio", value=konfig.get("local_port", "1234"), dense=True)
+    txt_local_model = ft.TextField(
+        label="Model LM Studio",
+        value=konfig.get("local_model", "qwen3-vl-4b-instruct"),
+        dense=True
+    )
+
+    async def klik_budzenie_wol(e):
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: wyslij_wol(txt_mac.value.strip()))
+            status_text.value = "Pakiet Wake-on-LAN wysłany. Serwer się uruchamia."
+            status_text.color = ft.Colors.CYAN_ACCENT
+        except Exception as err_wol:
+            status_text.value = f"Błąd WoL: {err_wol}"
+            status_text.color = ft.Colors.RED_ACCENT
+        page.update()
+
+    btn_wol_ustawienia = ft.Button(
+        content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer lokalny (WoL)")]),
+        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
+        on_click=klik_budzenie_wol
+    )
+
+    liczba_towarow = len(wczytaj_baze_pcmarket())
+    lbl_status_bazy = ft.Text(
+        f"Załadowano {liczba_towarow} pozycji z pliku WĘDLINA.txt" if liczba_towarow > 0 else "Nie znaleziono pliku WĘDLINA.txt w katalogu!",
+        size=12,
+        color=ft.Colors.GREEN_300 if liczba_towarow > 0 else ft.Colors.ORANGE_300
+    )
+
+    kontener_baza_pcmarket = ft.Column(
+        [
+            ft.Text("Baza towarowa PC-Market:", weight=ft.FontWeight.BOLD, color=ft.Colors.AMBER_300),
+            chk_db_matching,
+            lbl_status_bazy
+        ],
+        spacing=4
+    )
+
+    kontener_gemini = ft.Column(
+        [
+            ft.Text("Konfiguracja Google Gemini:", weight=ft.FontWeight.BOLD, color=ft.Colors.CYAN_300),
+            txt_gemini_key,
+            dd_gemini_model,
+            txt_custom_model,
+            txt_gemini_url
+        ],
+        spacing=8,
+        visible=chk_cloud.value
+    )
+
+    kontener_lokalny = ft.Column(
+        [
+            ft.Text("Konfiguracja serwera lokalnego:", weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE_300),
+            txt_mac,
+            txt_ip,
+            txt_port,
+            txt_local_model,
+            btn_wol_ustawienia
+        ],
+        spacing=8,
+        visible=not chk_cloud.value
+    )
+
+    def przelacz_profil(e):
+        kontener_gemini.visible = chk_cloud.value
+        kontener_lokalny.visible = not chk_cloud.value
+        page.update()
+
+    chk_cloud.on_change = przelacz_profil
 
     status_text = ft.Text(
-        "Gotowy do wybrania zdjęcia faktury.",
+        "Wybierz zdjęcie specyfikacji lub faktury.",
         size=13,
         color=ft.Colors.GREEN_ACCENT,
         text_align=ft.TextAlign.CENTER
@@ -194,7 +418,7 @@ async def main(page: ft.Page):
         btn_udostepnij.visible = False
         btn_ponow.visible = False
         wiersz_obrotu.visible = False
-        status_text.value = "Zdjęcie usunięte. Wybierz nowe zdjęcie faktury."
+        status_text.value = "Zdjęcie usunięte. Wybierz nowe zdjęcie."
         status_text.color = ft.Colors.GREEN_ACCENT
         page.update()
 
@@ -215,7 +439,7 @@ async def main(page: ft.Page):
                 obrocony.save(sciezka)
             
             podglad_obrazu.src = f"{sciezka}?t={datetime.now().timestamp()}"
-            status_text.value = f"Obrócono zdjęcie o {abs(kat)}°. Kliknij 'Wyślij ponownie do analizy'."
+            status_text.value = f"Obrócono zdjęcie o {abs(kat)}°. Kliknij 'Wyślij do analizy'."
             status_text.color = ft.Colors.CYAN_ACCENT
             btn_ponow.visible = True
             page.update()
@@ -224,13 +448,13 @@ async def main(page: ft.Page):
             page.update()
 
     btn_obroc_lewo = ft.Button(
-        content=ft.Row([ft.Icon(ft.Icons.ROTATE_LEFT), ft.Text("W lewo")], alignment=ft.MainAxisAlignment.CENTER),
+        content=ft.Row([ft.Icon(ft.Icons.ROTATE_LEFT), ft.Text("Obróć w lewo")], alignment=ft.MainAxisAlignment.CENTER),
         expand=True,
         on_click=lambda e: obroc_zdjecie(90)
     )
 
     btn_obroc_prawo = ft.Button(
-        content=ft.Row([ft.Icon(ft.Icons.ROTATE_RIGHT), ft.Text("W prawo")], alignment=ft.MainAxisAlignment.CENTER),
+        content=ft.Row([ft.Icon(ft.Icons.ROTATE_RIGHT), ft.Text("Obróć w prawo")], alignment=ft.MainAxisAlignment.CENTER),
         expand=True,
         on_click=lambda e: obroc_zdjecie(-90)
     )
@@ -242,13 +466,20 @@ async def main(page: ft.Page):
         page.update()
 
     def zapisz_i_zamknij_dialog(e):
+        konfig["use_cloud"] = chk_cloud.value
+        konfig["use_db_matching"] = chk_db_matching.value
+        konfig["gemini_api_key"] = txt_gemini_key.value.strip()
+        
+        if dd_gemini_model.value == "custom":
+            konfig["gemini_model"] = txt_custom_model.value.strip() or "gemini-2.5-flash"
+        else:
+            konfig["gemini_model"] = dd_gemini_model.value
+
+        konfig["gemini_base_url"] = txt_gemini_url.value.strip()
         konfig["wol_mac"] = txt_mac.value.strip()
-        konfig["serwer_ip"] = txt_ip.value.strip()
-        konfig["serwer_port"] = txt_port.value.strip()
-        konfig["api_key"] = txt_api_key.value.strip()
-        konfig["model_name"] = txt_model.value.strip()
-        konfig["use_custom_url"] = chk_custom.value
-        konfig["custom_base_url"] = txt_custom_url.value.strip()
+        konfig["local_ip"] = txt_ip.value.strip()
+        konfig["local_port"] = txt_port.value.strip()
+        konfig["local_model"] = txt_local_model.value.strip()
         
         zapisz_konfiguracje(konfig)
         dlg_ustawienia.open = False
@@ -260,7 +491,12 @@ async def main(page: ft.Page):
         title=ft.Text("⚙️ Ustawienia połączenia"),
         content=ft.Column(
             [
-                txt_mac, txt_ip, txt_port, txt_model, txt_api_key, wiersz_chmura, txt_custom_url
+                chk_cloud,
+                ft.Divider(),
+                kontener_gemini,
+                kontener_lokalny,
+                ft.Divider(),
+                kontener_baza_pcmarket
             ],
             tight=True, scroll=ft.ScrollMode.AUTO, spacing=10
         ),
@@ -279,50 +515,36 @@ async def main(page: ft.Page):
         dlg_ustawienia.open = True
         page.update()
 
-    async def klik_budzenie_wol(e):
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: wyslij_wol(txt_mac.value.strip()))
-            status_text.value = "Pakiet Wake-on-LAN wysłany. Poczekaj 15-20 sek. na start serwera."
-            status_text.color = ft.Colors.CYAN_ACCENT
-        except Exception as err_wol:
-            status_text.value = f"Błąd WoL: {err_wol}"
-            status_text.color = ft.Colors.RED_ACCENT
-        page.update()
-
-    # Rejestracja serwisów systemowych
-    picker = ft.FilePicker()
     serwis_udostepniania = ft.Share()
-
     if hasattr(page, "services"):
-        page.services.append(picker)
         page.services.append(serwis_udostepniania)
     else:
-        page.overlay.extend([picker, serwis_udostepniania])
+        page.overlay.append(serwis_udostepniania)
 
     async def udostepnij_plik(sciezka):
         if not sciezka or not os.path.exists(sciezka):
-            status_text.value = "Brak pliku EDI do udostępnienia (wybierz i przetwórz zdjęcie)."
+            status_text.value = "Brak pliku EDI do udostępnienia."
             status_text.color = ft.Colors.RED_ACCENT
             page.update()
             return
 
         try:
-            # 1. Próba natywnego menu udostępniania (Android / iOS)
             if hasattr(serwis_udostepniania, "share_files"):
                 try:
                     await serwis_udostepniania.share_files(
                         [ft.ShareFile.from_path(sciezka)],
-                        text="Plik EDI wygenerowany przez ocrLmm"
+                        text="Plik EDI dla PC-Market"
                     )
                     return
                 except Exception:
                     await serwis_udostepniania.share_files([sciezka])
                     return
 
-            # 2. Fallback na komputerze z Windows
-            os.system(f'explorer /select,"{os.path.abspath(sciezka)}"')
-            status_text.value = "Otwarto folder z plikiem EDI na komputerze."
+            if os.name == "nt":
+                os.system(f'explorer /select,"{os.path.abspath(sciezka)}"')
+                status_text.value = "Otwarto folder z plikiem EDI."
+            else:
+                status_text.value = f"Plik EDI zapisano w: {sciezka}"
             status_text.color = ft.Colors.CYAN_ACCENT
             page.update()
 
@@ -336,7 +558,11 @@ async def main(page: ft.Page):
             return
 
         try:
-            status_text.value = "Kompresja i analiza faktury..."
+            uzywa_chmury = konfig.get("use_cloud", True)
+            uzywa_bazy = konfig.get("use_db_matching", True)
+            nazwa_silnika = konfig.get("gemini_model", "gemini-2.5-flash") if uzywa_chmury else konfig.get("local_model", "LM Studio")
+            
+            status_text.value = f"Przetwarzanie dokumentu ({nazwa_silnika})..."
             status_text.color = ft.Colors.ORANGE_ACCENT
             pasek_postepu.visible = True
             btn_foto.disabled = True
@@ -349,33 +575,60 @@ async def main(page: ft.Page):
             loop = asyncio.get_running_loop()
             base64_image = await loop.run_in_executor(None, kompresuj_do_base64, sciezka_obrazu)
 
-            if konfig["use_custom_url"]:
-                b_url = konfig["custom_base_url"].strip()
+            if uzywa_chmury:
+                raw_url = konfig.get("gemini_base_url", "").strip().rstrip("/")
+                if raw_url.endswith("/chat/completions"):
+                    pelny_url = raw_url
+                else:
+                    pelny_url = f"{raw_url}/chat/completions"
+                klucz = konfig.get("gemini_api_key", "").strip()
+                wybrany_model = konfig.get("gemini_model", "gemini-2.5-flash").strip()
             else:
-                b_url = f"http://{konfig['serwer_ip'].strip()}:{konfig['serwer_port'].strip()}/v1"
+                ip = konfig.get("local_ip", "192.168.1.154").strip()
+                port = konfig.get("local_port", "1234").strip()
+                pelny_url = f"http://{ip}:{port}/v1/chat/completions"
+                klucz = "sk-lm-local"
+                wybrany_model = konfig.get("local_model", "qwen3-vl-4b-instruct").strip()
 
             prompt = (
-                "Przeanalizuj to zdjęcie. Jeśli na obrazie NIE MA faktury, dokumentu handlowego "
-                "lub brak jest tabeli z pozycjami towarowymi, lub horyzont/układ jest całkowicie niewłaściwy, "
-                "zwróć DOKŁADNIE: {\"error\": \"brak_faktury\"}.\n\n"
-                "Jeśli obraz JEST fakturą, wyodrębnij dane do JSON o strukturze:\n"
+                "Jesteś precyzyjnym skanerem OCR faktur i specyfikacji mięsnych. "
+                "Przepisz DOKŁADNIE tekst ze zdjęcia dokumentu. Nie zmyślaj żadnych danych!\n\n"
+                "Instrukcje dotyczące pól:\n"
+                "1. Nagłówek: odczytaj numer dokumentu (nr_dok).\n"
+                "2. Wystawca i Odbiorca: przepisz nazwy, adresy, kody, miasta i NIP.\n"
+                "3. Tabela towarowa: Przepisz DOKŁADNIE każdy wiersz z tabeli:\n"
+                "   - nazwa: nazwa towaru\n"
+                "   - kod: kod towaru / CN / Nr D-t\n"
+                "   - ilosc: waga/ilość\n"
+                "   - jm: jednostka (np. kg)\n"
+                "   - cena_netto: cena netto po rabacie\n"
+                "   - wartosc_netto: wartość netto danej pozycji\n"
+                "   - vat: stawka VAT (np. 5 lub 23)\n"
+                "4. Podsumowanie: odczytaj 'Razem netto' (suma_netto_dokument), stawki VAT oraz kwotę do_zaplaty.\n\n"
+                "Zwróć TYLKO czysty JSON zgodny ze strukturą:\n"
                 "{\n"
-                "  \"nr_dok\": \"numer faktury\",\n"
+                "  \"nr_dok\": \"...\",\n"
                 "  \"data\": \"DD.MM.RRRR\",\n"
-                "  \"termin_platnosci_dni\": \"ilość dni lub data\",\n"
-                "  \"sposob_platnosci\": \"PRZEL/GOT/itp\",\n"
-                "  \"wystawca\": {\"nazwa\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\", \"nip\": \"...\", \"bank\": \"...\", \"konto\": \"...\"},\n"
-                "  \"odbiorca\": {\"nazwa\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\", \"nip\": \"...\"},\n"
-                "  \"pozycje\": [{\"nazwa\": \"...\", \"kod\": \"...\", \"vat\": \"23\", \"jm\": \"szt\", \"asortyment\": \"\", \"pkwiu\": \"\", \"ilosc\": \"1\", \"cena_netto\": \"0.00\", \"wartosc_netto\": \"0.00\"}],\n"
-                "  \"stawki\": [{\"vat\": \"23\", \"suma_netto\": \"0.00\", \"suma_vat\": \"0.00\"}],\n"
+                "  \"termin_platnosci_dni\": \"14\",\n"
+                "  \"sposob_platnosci\": \"PRZEL\",\n"
+                "  \"wystawca\": {\"nazwa\": \"...\", \"nip\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\"},\n"
+                "  \"odbiorca\": {\"nazwa\": \"...\", \"nip\": \"...\", \"adres\": \"...\", \"kod\": \"...\", \"miasto\": \"...\", \"ulica\": \"...\"},\n"
+                "  \"pozycje\": [\n"
+                "    {\"nazwa\": \"...\", \"kod\": \"...\", \"vat\": \"5\", \"jm\": \"kg\", \"ilosc\": \"0.000\", \"cena_netto\": \"0.00\", \"wartosc_netto\": \"0.00\"}\n"
+                "  ],\n"
+                "  \"suma_netto_dokument\": \"0.00\",\n"
+                "  \"stawki\": [{\"vat\": \"5\", \"suma_netto\": \"0.00\", \"suma_vat\": \"0.00\"}],\n"
                 "  \"do_zaplaty\": \"0.00\"\n"
-                "}\n"
-                "Zwróć TYLKO czysty JSON, bez znaczników ```json."
+                "}"
             )
 
-            naglowki = {"Authorization": f"Bearer {konfig['api_key'].strip() or 'sk-lm-local'}"}
+            naglowki = {
+                "Authorization": f"Bearer {klucz}",
+                "Content-Type": "application/json"
+            }
+
             cialo_zapytania = {
-                "model": konfig["model_name"].strip() or "google/gemma-3-4b",
+                "model": wybrany_model,
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -383,34 +636,50 @@ async def main(page: ft.Page):
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }],
-                "temperature": 0.1
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"}
             }
 
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                odpowiedz = await client.post(
-                    f"{b_url}/chat/completions",
-                    headers=naglowki,
-                    json=cialo_zapytania
-                )
-                odpowiedz.raise_for_status()
+            max_prob = 4
+            opoznienie_poczatkowe = 2.0
+            odpowiedz = None
+
+            async with httpx.AsyncClient(timeout=90.0, verify=True) as client:
+                for proba in range(max_prob):
+                    odpowiedz = await client.post(
+                        pelny_url,
+                        headers=naglowki,
+                        json=cialo_zapytania
+                    )
+                    
+                    if odpowiedz.status_code in [503, 429]:
+                        if proba < max_prob - 1:
+                            czas_oczekiwania = opoznienie_poczatkowe * (2 ** proba)
+                            status_text.value = f"Serwer zajęty ({odpowiedz.status_code}). Ponawianie {proba + 1}/{max_prob} za {czas_oczekiwania:.1f}s..."
+                            status_text.color = ft.Colors.AMBER_ACCENT
+                            page.update()
+                            await asyncio.sleep(czas_oczekiwania)
+                            continue
+                    
+                    odpowiedz.raise_for_status()
+                    break
+
                 dane_odp = odpowiedz.json()
                 odp_tekst = dane_odp["choices"][0]["message"]["content"].strip()
 
             dopasowanie = re.search(r'\{.*\}', odp_tekst, re.DOTALL)
             if not dopasowanie:
-                raise ValueError("Model AI nie zwrócił poprawnego formatu strukturalnego. Spróbuj obrócić zdjęcie.")
+                raise ValueError("Model AI nie zwrócił formatu JSON.")
 
             czysty_json = dopasowanie.group(0)
 
             try:
                 dane = json.loads(czysty_json)
             except json.JSONDecodeError:
-                raise ValueError("Wewnętrzny błąd parsowania JSON. Zdjęcie może być nieczytelne.")
+                raise ValueError("Błąd parsowania odpowiedzi JSON.")
 
-            if "error" in dane:
-                raise ValueError("AI nie wykryło tabeli faktury. Jeśli dokument jest w poziomie, obróć go przyciskami poniżej i spróbuj ponownie.")
-
-            tresc_edi = generuj_tekst_edi(dane)
+            zgodne_sumy, info_sumy = weryfikuj_sumy_netto(dane)
+            tresc_edi = generuj_tekst_edi(dane, uzywa_bazy)
 
             nr_dok = "".join(c for c in dane.get("nr_dok", "faktura") if c.isalnum() or c in ("-", "_"))
             nazwa_pliku = f"edi_{nr_dok}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -420,18 +689,52 @@ async def main(page: ft.Page):
                 f.write(tresc_edi)
 
             ostatnia_sciezka_edi["sciezka"] = sciezka_edi
-            status_text.value = f"✅ Gotowe! Utworzono: {nazwa_pliku}"
-            status_text.color = ft.Colors.GREEN_ACCENT
+            
+            tryb_info = " (dopasowano do PC-Market)" if uzywa_bazy else " (kody oryginalne)"
+            if zgodne_sumy:
+                status_text.value = f"✅ Gotowe! Zapisano: {nazwa_pliku}\n({info_sumy}){tryb_info}"
+                status_text.color = ft.Colors.GREEN_ACCENT
+            else:
+                status_text.value = f"⚠️ Zapisano: {nazwa_pliku}\n{info_sumy}{tryb_info}"
+                status_text.color = ft.Colors.AMBER_ACCENT
             
             btn_udostepnij.visible = True
             await udostepnij_plik(sciezka_edi)
 
         except Exception as err:
             komunikat = str(err)
-            if "timeout" in komunikat.lower() or "timed out" in komunikat.lower():
-                status_text.value = "Błąd: Serwer nie odpowiada (Timeout). Upewnij się, że komputer jest włączony i sprawdź IP."
+            
+            if "503" in komunikat:
+                pokaz_okno_bledu(
+                    "⏳ Serwer Gemini jest przeciążony",
+                    "Mimo 4 prób serwery Google były przeciążone (błąd 503).\n\n"
+                    "Odczekaj kilkanaście sekund i kliknij 'Wyślij do analizy'."
+                )
+                status_text.value = "Serwer Gemini jest przeciążony (503). Spróbuj za chwilę."
+            elif "429" in komunikat:
+                pokaz_okno_bledu(
+                    "⏳ Przekroczono limit zapytań (429)",
+                    "Darmowy limit zapytań na minutę został wyczerpany. Odczekaj chwilę."
+                )
+                status_text.value = "Limit zapytań osiągnięty (429). Odczekaj 30 sekund."
+            elif "401" in komunikat or "unauthorized" in komunikat.lower():
+                pokaz_okno_bledu(
+                    "🔑 Błąd autoryzacji (401)",
+                    "Klucz API jest nieprawidłowy lub wygasł.\nSprawdź klucz w ustawieniach (zębatka)."
+                )
+                status_text.value = "Błąd 401: Sprawdź klucz API w ustawieniach."
+            elif "timeout" in komunikat.lower() or "timed out" in komunikat.lower():
+                pokaz_okno_bledu(
+                    "⏱️ Przekroczono czas oczekiwania",
+                    "Serwer nie odpowiedział w ciągu 90 sekund. Sprawdź jakość połączenia internetowego."
+                )
+                status_text.value = "Błąd: Przekroczono limit czasu (Timeout)."
             elif "connect" in komunikat.lower() or "refused" in komunikat.lower():
-                status_text.value = "Błąd połączenia: Serwer LM Studio jest wyłączony lub podano złe IP."
+                pokaz_okno_bledu(
+                    "🔌 Brak połączenia",
+                    "Nie udało się połączyć z podanym adresem. Upewnij się, że masz połączenie z siecią."
+                )
+                status_text.value = "Błąd połączenia z serwerem."
             else:
                 status_text.value = f"Błąd: {komunikat}"
             
@@ -443,6 +746,12 @@ async def main(page: ft.Page):
             btn_usun_zdjecie.visible = True
             wiersz_obrotu.visible = True
             page.update()
+
+    picker = ft.FilePicker()
+    if hasattr(page, "services"):
+        page.services.append(picker)
+    else:
+        page.overlay.append(picker)
 
     async def wybierz_zdjecie(e):
         try:
@@ -456,6 +765,7 @@ async def main(page: ft.Page):
                 podglad_obrazu.visible = True
                 btn_usun_zdjecie.visible = True
                 wiersz_obrotu.visible = True
+                btn_ponow.visible = True
                 page.update()
                 await przetworz_plik(wybrany)
         except Exception as e_pick:
@@ -464,7 +774,7 @@ async def main(page: ft.Page):
 
     btn_foto = ft.Button(
         content=ft.Row(
-            [ft.Icon(ft.Icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie faktury")],
+            [ft.Icon(ft.Icons.PHOTO_LIBRARY), ft.Text("Wybierz zdjęcie specyfikacji / faktury")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         height=55,
@@ -482,7 +792,7 @@ async def main(page: ft.Page):
 
     btn_ponow = ft.Button(
         content=ft.Row(
-            [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij ponownie do analizy")],
+            [ft.Icon(ft.Icons.REFRESH), ft.Text("Wyślij do analizy")],
             alignment=ft.MainAxisAlignment.CENTER
         ),
         visible=False,
@@ -513,12 +823,6 @@ async def main(page: ft.Page):
         on_click=klik_udostepnij
     )
 
-    btn_wol = ft.Button(
-        content=ft.Row([ft.Icon(ft.Icons.POWER_SETTINGS_NEW), ft.Text("Obudź serwer (WoL)")]),
-        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_GREY_900, color=ft.Colors.BLUE_200),
-        on_click=klik_budzenie_wol
-    )
-
     btn_settings = ft.IconButton(
         icon=ft.Icons.SETTINGS,
         tooltip="Ustawienia połączenia",
@@ -530,7 +834,7 @@ async def main(page: ft.Page):
             ft.Column(
                 [
                     ft.Text("ocrLmm Mobile", size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_400),
-                    ft.Text("Skaner PZ do EDI", size=12, color=ft.Colors.GREY_400)
+                    ft.Text("Skaner PZ do EDI (PC-Market)", size=12, color=ft.Colors.GREY_400)
                 ],
                 spacing=2
             ),
@@ -545,7 +849,6 @@ async def main(page: ft.Page):
                 pasek_tytulu,
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 btn_foto,
-                btn_wol,
                 pasek_postepu,
                 status_text,
                 btn_ponow,
