@@ -26,7 +26,8 @@ DOMYSLNA_KONFIGURACJA = {
     "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
     "local_ip": "192.168.1.154",
     "local_port": "1234",
-    "local_model": "qwen3-vl-4b-instruct"
+    "local_model": "qwen3-vl-4b-instruct",
+    "local_api_key": ""
 }
 
 def wczytaj_baze_pcmarket() -> list[dict]:
@@ -335,6 +336,13 @@ async def main(page: ft.Page):
         value=konfig.get("local_model", "qwen3-vl-4b-instruct"),
         dense=True
     )
+    txt_local_api_key = ft.TextField(
+        label="Klucz API serwera lokalnego (opcjonalnie)",
+        value=konfig.get("local_api_key", ""),
+        password=True,
+        can_reveal_password=True,
+        dense=True
+    )
 
     async def klik_budzenie_wol(e):
         try:
@@ -388,6 +396,7 @@ async def main(page: ft.Page):
             txt_ip,
             txt_port,
             txt_local_model,
+            txt_local_api_key,
             btn_wol_ustawienia
         ],
         spacing=8,
@@ -480,6 +489,7 @@ async def main(page: ft.Page):
         konfig["local_ip"] = txt_ip.value.strip()
         konfig["local_port"] = txt_port.value.strip()
         konfig["local_model"] = txt_local_model.value.strip()
+        konfig["local_api_key"] = txt_local_api_key.value.strip()
         
         zapisz_konfiguracje(konfig)
         dlg_ustawienia.open = False
@@ -587,7 +597,7 @@ async def main(page: ft.Page):
                 ip = konfig.get("local_ip", "192.168.1.154").strip()
                 port = konfig.get("local_port", "1234").strip()
                 pelny_url = f"http://{ip}:{port}/v1/chat/completions"
-                klucz = "sk-lm-local"
+                klucz = konfig.get("local_api_key", "").strip()
                 wybrany_model = konfig.get("local_model", "qwen3-vl-4b-instruct").strip()
 
             prompt = (
@@ -623,9 +633,11 @@ async def main(page: ft.Page):
             )
 
             naglowki = {
-                "Authorization": f"Bearer {klucz}",
                 "Content-Type": "application/json"
             }
+
+            if klucz:
+                naglowki["Authorization"] = f"Bearer {klucz}"
 
             # Bazowe ciało zapytania wspólne dla obu silników
             cialo_zapytania = {
